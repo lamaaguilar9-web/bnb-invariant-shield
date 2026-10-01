@@ -1,0 +1,22 @@
+{
+  "name": "bnb-invariant-shield",
+  "version": "1.0.0",
+  "description": "Institutional DeFi Circuit Breaker & Invariant Guardian for BNB Chain & opBNB",
+  "main": "index.js",
+  "scripts": {
+    "test": "python tests/test_bsc_invariant_shield.py"
+  },
+  "keywords": [
+    "bnb-chain",
+    "bsc",
+    "opbnb",
+    "binance-labs",
+    "mvb",
+    "circuit-breaker",
+    "defi-security",
+    "pancakeswap-v3",
+    "venus-protocol"
+  ],
+  "author": "Luis Aguilar (Sentinel Fleet Technologies)",
+  "license": "MIT"
+}

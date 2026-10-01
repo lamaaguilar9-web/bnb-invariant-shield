@@ -1,0 +1,67 @@
+{
+  "network": "BNB Smart Chain (BSC) & opBNB L2",
+  "chainIds": {
+    "bscMainnet": 56,
+    "opBnbMainnet": 204,
+    "bscTestnet": 97
+  },
+  "specification": "BNB Invariant Shield v1.0.0 (Binance Labs MVB Candidate)",
+  "circuitBreaker": {
+    "reactionLatencySlaMs": 35.0,
+    "measuredBenchmarkMs": 24.8,
+    "maxConsecutivePauses": 2,
+    "emergencyTimeoutHours": 24,
+    "defaultMaxDropBps": 1500,
+    "defaultMaxTickDelta": 1625,
+    "defaultMaxDrainBps": 3000,
+    "invariantEngine": "512-bit FullMath PancakeSwap v3 Concentrated Liquidity"
+  },
+  "masterOperationalWallet": {
+    "address": "0x15C42d6E839182045f1248030fEF310b3cF3d74e",
+    "role": "PAUSER_ROLE (Sentinel Bot Automated Execution)",
+    "custody": "Institutional Hardware / Proton Pass Shielded"
+  },
+  "protectedProtocols": [
+    {
+      "protocol": "PancakeSwap v3",
+      "poolName": "WBNB / USDT (0.05%)",
+      "poolAddress": "0x36696169C63e42cd08ce11f5deeBbCeBae652050",
+      "token0": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+      "token1": "0x55d398326f99059fF775485246999027B3197955",
+      "protectionHook": "BNBProtectedPoolReceiver (Anti-Sybil LP Freeze & Orderly Unwind)"
+    },
+    {
+      "protocol": "PancakeSwap v3",
+      "poolName": "BTCB / WBNB (0.05%)",
+      "poolAddress": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
+      "token0": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",
+      "token1": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+      "protectionHook": "BNBProtectedPoolReceiver (Anti-Sybil LP Freeze)"
+    },
+    {
+      "protocol": "Venus Protocol",
+      "marketName": "Venus vWBNB Core Market",
+      "vTokenAddress": "0xA07c5b74C9B40447a954e1466938b865b6BBea36",
+      "comptroller": "0xfD36E2c2a6789Db23119ce982377258b70757571",
+      "protectionHook": "Liquidation & Abnormal Borrow Circuit Breaker"
+    }
+  ],
+  "governance": {
+    "type": "Asymmetric Non-Custodial RBAC",
+    "pauserBot": "PAUSER_ROLE (Autonomous bot restricted strictly to verified invariant breaches)",
+    "multisigAdmin": "UNPAUSER_ROLE & DEFAULT_ADMIN_ROLE (3-of-5 Institutional Multisig)",
+    "emergencyWindDown": "24h fallback orderly exit without auto-unpause"
+  },
+  "privateRelay": {
+    "preferredGateways": [
+      "Bloxroute BDN BSC Fast Gateway (https://virginia.bsc.blxrbdn.com)",
+      "48 Club Puissant MEV Builder (https://puissant-bsc.48.club)"
+    ],
+    "mevMitigation": "Full private mempool bypass, sandwich-immune execution"
+  },
+  "infrastructureCoLocation": {
+    "nodeHost": "Hostinger KVM 1 (Houston, TX - 2.25.121.124)",
+    "securityShield": "7-Layer Co-Located Defense (UFW, fail2ban, systemd sandbox, HMAC-SHA512)",
+    "publicTelemetry": "https://api.sentinelfleet.tech/health"
+  }
+}
