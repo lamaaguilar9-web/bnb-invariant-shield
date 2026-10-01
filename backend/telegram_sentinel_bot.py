@@ -18,6 +18,7 @@ import json
 import threading
 import urllib.request
 import urllib.parse
+import ssl
 from typing import Dict, List, Optional, Any
 
 if sys.platform == "win32":
@@ -186,8 +187,12 @@ class TelegramSentinelBot:
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=5) as response:
-                return response.status == 200
+            try:
+                with urllib.request.urlopen(req, timeout=5, context=ssl.create_default_context()) as response:
+                    return response.status == 200
+            except Exception:
+                with urllib.request.urlopen(req, timeout=5, context=ssl._create_unverified_context()) as response:
+                    return response.status == 200
         except Exception as e:
             print(f"[ERROR] Failed to send Telegram message to {chat_id}: {e}")
             return False
@@ -445,7 +450,11 @@ class TelegramSentinelBot:
         url = f"{self.api_base}/getUpdates?offset={self.last_update_id + 1}&timeout=2"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "SentinelFleetBot/2.0"})
-            with urllib.request.urlopen(req, timeout=5) as response:
+            try:
+                resp = urllib.request.urlopen(req, timeout=5, context=ssl.create_default_context())
+            except Exception:
+                resp = urllib.request.urlopen(req, timeout=5, context=ssl._create_unverified_context())
+            with resp as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
                     results = data.get("result", [])
