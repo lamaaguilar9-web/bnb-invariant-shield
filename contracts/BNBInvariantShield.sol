@@ -29,6 +29,7 @@ contract BNBInvariantShield {
         address poolReceiver;
         address oracleFeed;
         uint160 initialSqrtPriceX96;
+        uint160 highWaterMarkSqrtPriceX96; // HWM: Highest observed price to defeat multi-block salami-slicing
         int24 initialTick;
         uint128 initialLiquidity;
         uint256 lastPauseTimestamp;
@@ -40,6 +41,7 @@ contract BNBInvariantShield {
     mapping(address => TargetConfig) public targets;
 
     event TargetRegistered(address indexed targetPool, address indexed poolReceiver, address oracleFeed);
+    event HighWaterMarkUpdated(address indexed targetPool, uint160 newHighWaterMarkSqrtPriceX96);
     event EmergencyPauseTriggered(address indexed targetPool, uint160 currentSqrtPriceX96, uint128 currentLiquidity, address indexed triggeredBy);
     event TargetUnpausedByMultisig(address indexed targetPool, address indexed unpausedBy);
     event EmergencyWindDownActivated(address indexed targetPool, uint256 timestamp);
@@ -95,6 +97,7 @@ contract BNBInvariantShield {
             poolReceiver: poolReceiver,
             oracleFeed: oracleFeed,
             initialSqrtPriceX96: sqrtPriceX96,
+            highWaterMarkSqrtPriceX96: sqrtPriceX96,
             initialTick: tick,
             initialLiquidity: poolLiquidity,
             lastPauseTimestamp: 0,
@@ -104,6 +107,20 @@ contract BNBInvariantShield {
         });
 
         emit TargetRegistered(targetPool, poolReceiver, oracleFeed);
+    }
+
+    /// @notice Updates the High-Water Mark (highest observed valuation) as pool price organically appreciates
+    /// @dev Defeats multi-block salami-slicing attacks (GLM-5.3 audit finding H-1) by preserving peak valuation
+    function updateHighWaterMark(address targetPool) public {
+        TargetConfig storage config = targets[targetPool];
+        require(config.isRegistered, "NOT_REGISTERED");
+        require(config.state == PoolState.NORMAL, "NOT_NORMAL");
+
+        (uint160 currentSqrtPriceX96,,,,,,) = IPancakeV3Pool(targetPool).slot0();
+        if (currentSqrtPriceX96 > config.highWaterMarkSqrtPriceX96) {
+            config.highWaterMarkSqrtPriceX96 = currentSqrtPriceX96;
+            emit HighWaterMarkUpdated(targetPool, currentSqrtPriceX96);
+        }
     }
 
     /// @notice Triggers emergency circuit breaker pause if and only if on-chain invariant breach is mathematically verified
@@ -117,8 +134,18 @@ contract BNBInvariantShield {
         (uint160 currentSqrtPriceX96, int24 currentTick,,,,,) = IPancakeV3Pool(targetPool).slot0();
         uint128 currentLiquidity = IPancakeV3Pool(targetPool).liquidity();
 
+        // Update High-Water Mark if market appreciated, ensuring peak-to-trough measurement
+        if (currentSqrtPriceX96 > config.highWaterMarkSqrtPriceX96) {
+            config.highWaterMarkSqrtPriceX96 = currentSqrtPriceX96;
+            emit HighWaterMarkUpdated(targetPool, currentSqrtPriceX96);
+        }
+
+        uint160 anchorPrice = config.highWaterMarkSqrtPriceX96 > 0
+            ? config.highWaterMarkSqrtPriceX96
+            : config.initialSqrtPriceX96;
+
         (bool dropExceeded, ) = PancakeV3InvariantChecker.checkExactPriceDrop(
-            config.initialSqrtPriceX96,
+            anchorPrice,
             currentSqrtPriceX96,
             config.maxDeviationBps
         );
@@ -168,6 +195,7 @@ contract BNBInvariantShield {
         }
 
         config.initialSqrtPriceX96 = currentSqrtPriceX96;
+        config.highWaterMarkSqrtPriceX96 = currentSqrtPriceX96;
         config.initialTick = newTick;
         config.initialLiquidity = IPancakeV3Pool(targetPool).liquidity();
         config.state = PoolState.NORMAL;

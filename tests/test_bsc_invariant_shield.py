@@ -359,6 +359,26 @@ def test_9_bsc_mempool_watcher_simulation():
     assert incident["dropBps"] == 2600
     assert incident["mitigationLatencyMs"] < 30.0
 
+def test_10_high_water_mark_salami_slicing_resistance():
+    """Verifies that High-Water Mark (HWM) tracking defeats multi-block salami-slicing attacks."""
+    # Peak price 600 USD (sqrtPrice = 1940250000000000000000000)
+    hwm_sqrt_price = 1940250000000000000000000
+    
+    # Step 1: Attacker drops price by 14.0% (below 15% threshold: 100% -> 86%)
+    # sqrt ratio = sqrt(0.86) = 0.9273618
+    p1_sqrt = int(hwm_sqrt_price * 0.9273618)
+    exceeded_1, drop_bps_1 = check_exact_quadratic_price_drop(hwm_sqrt_price, p1_sqrt, max_drop_bps=1500)
+    assert exceeded_1 is False
+    assert 1390 <= drop_bps_1 <= 1415
+
+    # Step 2: Attacker attempts second 14.0% drop in next block (86% -> 73.96%)
+    # Without HWM, comparing p2 to p1 would only see a 14% drop and not pause.
+    # With HWM, comparing p2 to hwm_sqrt_price reveals 26.04% total drop!
+    p2_sqrt = int(p1_sqrt * 0.9273618)
+    exceeded_2, drop_bps_2 = check_exact_quadratic_price_drop(hwm_sqrt_price, p2_sqrt, max_drop_bps=1500)
+    assert exceeded_2 is True, "HWM MUST DETECT MULTI-BLOCK SALAMI SLICING"
+    assert drop_bps_2 >= 2500, f"Expected cumulative drop >= 2500 bps, got {drop_bps_2}"
+
 if __name__ == "__main__":
     suite = [
         test_1_exact_512bit_quadratic_math,
@@ -370,9 +390,10 @@ if __name__ == "__main__":
         test_7_orderly_withdraw_with_pancake_burn,
         test_8_gas_engine_and_private_relay,
         test_9_bsc_mempool_watcher_simulation,
+        test_10_high_water_mark_salami_slicing_resistance,
     ]
     print(f"Executing {len(suite)} formal verification tests for BNB Invariant Shield...")
     for test in suite:
         test()
         print(f"  [PASS] {test.__name__}")
-    print("\nALL 9/9 BNB INVARIANT SHIELD FORMAL TESTS PASSED WITH 100% SUCCESS!")
+    print(f"\nALL {len(suite)}/{len(suite)} BNB INVARIANT SHIELD FORMAL TESTS PASSED WITH 100% SUCCESS!")
