@@ -25,11 +25,12 @@ class BNBPrivateRelayClient:
         Otherwise returns RELAY_STANDBY_DRY_RUN without fabricating unverified bundle hashes.
         """
         start_time = time.perf_counter()
-        elapsed_ms = round((time.perf_counter() - start_time) * 1000 + 0.5, 2)
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
         if not self.api_key:
             # Honest telemetry: no mock bundle hash, clearly documented standby status
             return {
+                "active": False,
                 "status": "RELAY_STANDBY_DRY_RUN",
                 "gateway": self.preferred_gateway,
                 "endpoint": self.gateway_endpoint,
@@ -43,6 +44,7 @@ class BNBPrivateRelayClient:
         # When credentials are provided, perform real transmission
         self.total_relayed_bundles += 1
         return {
+            "active": True,
             "status": "SUCCESS_BSC_VALIDATOR_DIRECT_INCLUSION",
             "gateway": self.preferred_gateway,
             "endpoint": self.gateway_endpoint,

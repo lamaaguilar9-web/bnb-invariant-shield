@@ -4,8 +4,8 @@ Sentinel Fleet Technologies - Telegram Early-Warning Sentinel Bot (Project #11)
 ==============================================================================
 Institutional Real-Time Alerting System for BNB Chain & opBNB.
 Monitors PancakeSwap v3 concentrated liquidity pools and on-chain state invariants.
-Broadcasts instant warning alerts to Telegram subscribers upon detecting
-mempool drain attempts, TWAP divergences, and sudden reserve shifts.
+Runs continuous daemon thread scanning on-chain blocks and broadcasts instant warning alerts
+to Telegram subscribers upon detecting mempool drain attempts, TWAP divergences, and sudden reserve shifts.
 
 Designed & Architected by Luis Aguilar, Founder & Lead Systems Architect, Sentinel Fleet Technologies.
 Zero-Custody Architecture ($0.00 client funds held - Pure Information Intelligence SaaS).
@@ -19,7 +19,7 @@ import threading
 import urllib.request
 import urllib.parse
 import ssl
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 
 if sys.platform == "win32":
     try:
@@ -52,22 +52,47 @@ _load_env_file()
 from backend.bsc_mempool_watcher import BSCMempoolWatcher
 
 
+def get_verified_ssl_context() -> ssl.SSLContext:
+    """
+    Returns strict verified SSL context using certifi CA bundle or SSL_CERT_FILE.
+    Insecure unverified contexts are strictly forbidden.
+    """
+    cafile = os.environ.get("SSL_CERT_FILE")
+    if not cafile:
+        try:
+            import certifi
+            cafile = certifi.where()
+        except Exception:
+            cafile = None
+
+    if cafile and os.path.exists(cafile):
+        return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
+
+
 class TelegramSentinelBot:
     """
-    Autonomous Telegram Alert Bot engine with disk persistence and tier-based gating.
+    Autonomous Telegram Alert Bot engine with disk persistence, continuous on-chain scanner daemon,
+    strict cryptographic TLS validation, and admin-gated subscription tiers.
     Zero third-party dependencies (pure standard library urllib/json).
     Enforces subscription plans: Free (public feed), Pro (up to 3 custom pools), Enterprise (unlimited).
     Validates custom pool contracts on-chain before admitting to monitor registry.
     """
 
-    def __init__(self, bot_token: Optional[str] = None, db_path: Optional[str] = None):
+    def __init__(
+        self,
+        bot_token: Optional[str] = None,
+        db_path: Optional[str] = None,
+        scan_interval: float = 2.5,
+        watcher: Optional[BSCMempoolWatcher] = None
+    ):
         if bot_token is not None:
             self.bot_token = bot_token.strip()
         else:
             self.bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}" if self.bot_token else None
-        self.watcher = BSCMempoolWatcher(chain_id=56)
+        self.watcher = watcher or BSCMempoolWatcher(chain_id=56)
         
         self.data_dir = os.path.join(project_root, "data")
         os.makedirs(self.data_dir, exist_ok=True)
@@ -76,8 +101,14 @@ class TelegramSentinelBot:
         self.subscribers: Dict[str, Dict[str, Any]] = {}
         self.alert_history: List[Dict[str, Any]] = []
         self.is_running = False
+        self.scan_interval = scan_interval
+        self._scanner_thread: Optional[threading.Thread] = None
         self.last_update_id = 0
         self._lock = threading.Lock()
+
+        # Approved administrators who can manage subscriber tiers
+        raw_admins = os.environ.get("APPROVED_ADMINS", "6758917070")
+        self.admin_chat_ids: Set[str] = set([s.strip() for s in raw_admins.split(",") if s.strip()])
 
         # Load persisted subscribers and alerts
         self._load_db()
@@ -113,7 +144,7 @@ class TelegramSentinelBot:
             return
 
         payload = {
-            "version": "2.0-bsc-rpc",
+            "version": "2.1-bsc-sensor",
             "last_updated": int(time.time()),
             "subscribers": self.subscribers,
             "alert_history": self.alert_history[-50:]  # Keep last 50 incidents
@@ -129,6 +160,36 @@ class TelegramSentinelBot:
                 os.rename(tmp_path, self.db_path)
         except Exception as e:
             print(f"[ERROR] Failed to persist database to {self.db_path}: {e}")
+
+    # =========================================================================
+    # Continuous On-Chain Invariant Sensor Loop (P11-B1)
+    # =========================================================================
+
+    def start_monitoring_daemon(self):
+        """Starts background daemon thread that continuously scans BSC invariants every scan_interval."""
+        with self._lock:
+            if self.is_running and self._scanner_thread and self._scanner_thread.is_alive():
+                return
+            self.is_running = True
+            self._scanner_thread = threading.Thread(target=self._scanner_loop, daemon=True, name="SentinelSensorLoop")
+            self._scanner_thread.start()
+
+    def stop_monitoring(self):
+        """Stops the continuous invariant scanning daemon."""
+        with self._lock:
+            self.is_running = False
+
+    def _scanner_loop(self):
+        """Continuous background thread evaluating on-chain BSC pool invariants and broadcasting incidents."""
+        while self.is_running:
+            try:
+                new_incidents = self.watcher.scan_monitored_invariants()
+                for incident in new_incidents:
+                    # Autonomously broadcast real on-chain incidents to subscribers
+                    self.broadcast_alert(incident)
+            except Exception as e:
+                print(f"[WARN] Error in sensor scanner loop: {e}")
+            time.sleep(self.scan_interval)
 
     def format_alert_message(self, incident: Dict[str, Any]) -> str:
         """
@@ -163,7 +224,7 @@ class TelegramSentinelBot:
         return message
 
     def send_telegram_message(self, chat_id: str, text: str) -> bool:
-        """Sends a message via Telegram Bot API with HTML formatting using native urllib."""
+        """Sends a message via Telegram Bot API using strictly verified SSL TLS context."""
         if not self.bot_token or not self.api_base:
             # Simulation / Dry-run fallback for tests
             try:
@@ -187,12 +248,9 @@ class TelegramSentinelBot:
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            try:
-                with urllib.request.urlopen(req, timeout=5, context=ssl.create_default_context()) as response:
-                    return response.status == 200
-            except Exception:
-                with urllib.request.urlopen(req, timeout=5, context=ssl._create_unverified_context()) as response:
-                    return response.status == 200
+            ctx = get_verified_ssl_context()
+            with urllib.request.urlopen(req, timeout=5, context=ctx) as response:
+                return response.status == 200
         except Exception as e:
             print(f"[ERROR] Failed to send Telegram message to {chat_id}: {e}")
             return False
@@ -272,6 +330,7 @@ class TelegramSentinelBot:
             base_gas = telemetry["gas"].get("baseGasPriceGwei", 1.0)
             block = telemetry["bscBlock"]
             rpc_status = "🟢 Conectado" if telemetry["rpcConnected"] else "🟡 Fallback / Offline"
+            sensor_status = "🟢 Activo (Daemon 24/7)" if self.is_running else "🟡 En Espera"
             
             return (
                 "🛰️ <b>ESTADO DE TELEMETRÍA SENTINEL (HOUSTON VPS)</b>\n"
@@ -279,6 +338,7 @@ class TelegramSentinelBot:
                 f"🌐 <b>Red:</b> {telemetry['network']}\n"
                 f"🧱 <b>Bloque BSC (RPC):</b> <code>#{block}</code>\n"
                 f"🔌 <b>Conexión JSON-RPC:</b> {rpc_status}\n"
+                f"⏱️ <b>Sensor Invariantes:</b> {sensor_status}\n"
                 f"⛽ <b>Gas Base BSC:</b> <code>{base_gas:.2f} Gwei</code>\n"
                 f"⚡ <b>Gas de Defensa:</b> <code>{gas_gwei:.2f} Gwei</code> (1.35x + 0.5 Gwei tip)\n"
                 f"🛡️ <b>Private Relay:</b> <code>{telemetry['privateRelay']['provider']}</code> ({telemetry['privateRelay']['status']})\n"
@@ -315,7 +375,7 @@ class TelegramSentinelBot:
                     "Para monitorear pools dedicados de tus propios proyectos, actualiza a:\n"
                     "• <b>Plan PRO ($150/mes):</b> Hasta 3 pools personalizados.\n"
                     "• <b>Plan ENTERPRISE ($300/mes):</b> Monitoreo de pools ilimitados.\n\n"
-                    "Escribe <code>/planes</code> para detalles de suscripción o <code>/upgrade PRO</code> para activar."
+                    "Escribe <code>/planes</code> para detalles de suscripción o contacta a soporte para activar."
                 )
 
             # Plan enforcement: Pro is capped at 3 custom pools (excluding the default community pool)
@@ -370,7 +430,7 @@ class TelegramSentinelBot:
             )
 
         elif cmd == "/simular":
-            incident = self.watcher.simulate_attack_and_mitigate("PancakeSwap_v3_WBNB_USDT")
+            incident = self.watcher.simulate_attack_and_mitigate("PancakeSwap_v3_WBNB_USDT", auto_reset_after_ms=True)
             self.broadcast_alert(incident)
             return (
                 "⚡ <b>Simulación de Ataque Invariant Ejecutada!</b>\n"
@@ -393,20 +453,52 @@ class TelegramSentinelBot:
                 )
 
         elif cmd == "/upgrade":
-            if len(parts) < 2:
-                return "⚠️ <b>Uso:</b> <code>/upgrade PRO</code> o <code>/upgrade ENTERPRISE</code>"
-            target_plan = parts[1].upper()
+            # Self-service upgrades are restricted: requires admin authorization or treasury payment (P11-M7)
+            if chat_id in self.admin_chat_ids and len(parts) >= 2:
+                target_plan = parts[1].upper()
+                if target_plan in ("FREE", "PRO", "ENTERPRISE"):
+                    with self._lock:
+                        if chat_id not in self.subscribers:
+                            self.subscribers[chat_id] = {"plan": target_plan, "subscribed_at": int(time.time()), "pools": ["PancakeSwap_v3_WBNB_USDT"]}
+                        else:
+                            self.subscribers[chat_id]["plan"] = target_plan
+                        self._save_db()
+                    return f"👑 <b>Admin:</b> Tu plan institucional fue actualizado a <b>{target_plan}</b>."
+
+            return (
+                "💳 <b>Activación de Planes Institucionales Sentinel Fleet</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "Para proteger la integridad del servicio, las suscripciones se activan mediante verificación:\n\n"
+                "1. Realiza el pago en USDT/BUSD a la tesorería oficial (BSC BEP-20):\n"
+                "   <code>0x15C42d6E839182045f1248030fEF310b3cF3d74e</code>\n\n"
+                "2. Envía el hash de la transacción y tu Chat ID a <b>@SentinelFleetOps</b>:\n"
+                f"   • Tu Chat ID: <code>{chat_id}</code>\n\n"
+                "3. Un administrador validará la transacción on-chain y activará tu plan inmediatamente.\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "ℹ️ <i>Admins autorizados: Usar <code>/setplan &lt;chat_id&gt; &lt;PLAN&gt;</code></i>"
+            )
+
+        elif cmd == "/setplan":
+            # Admin-only plan assignment (P11-M7)
+            if chat_id not in self.admin_chat_ids:
+                return "❌ <b>Acceso denegado:</b> Se requieren permisos de administrador de Sentinel Fleet."
+
+            if len(parts) < 3:
+                return "⚠️ <b>Uso de Admin:</b> <code>/setplan &lt;chat_id&gt; &lt;FREE|PRO|ENTERPRISE&gt;</code>"
+
+            target_user = parts[1].strip()
+            target_plan = parts[2].upper()
             if target_plan not in ("FREE", "PRO", "ENTERPRISE"):
                 return "❌ Plan no válido. Opciones: <code>FREE</code>, <code>PRO</code>, <code>ENTERPRISE</code>."
 
             with self._lock:
-                if chat_id not in self.subscribers:
-                    self.subscribers[chat_id] = {"plan": target_plan, "subscribed_at": int(time.time()), "pools": ["PancakeSwap_v3_WBNB_USDT"]}
+                if target_user not in self.subscribers:
+                    self.subscribers[target_user] = {"plan": target_plan, "subscribed_at": int(time.time()), "pools": ["PancakeSwap_v3_WBNB_USDT"]}
                 else:
-                    self.subscribers[chat_id]["plan"] = target_plan
+                    self.subscribers[target_user]["plan"] = target_plan
                 self._save_db()
 
-            return f"🎉 <b>Plan Actualizado con Éxito:</b> Tu cuenta ahora tiene nivel <b>{target_plan}</b>."
+            return f"✅ <b>Admin Éxito:</b> Usuario <code>{target_user}</code> asignado a plan <b>{target_plan}</b>."
 
         elif cmd == "/planes":
             return (
@@ -425,7 +517,7 @@ class TelegramSentinelBot:
                 "• Prioridad de soporte y telemetría dedicada.\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 "💳 <b>Pagos PayFi No-Custodiales:</b> USDT/BUSD en BSC.\n"
-                "📩 Usa <code>/upgrade PRO</code> o contacta a <b>@SentinelFleetOps</b> para facturación institucional."
+                "📩 Usa <code>/upgrade</code> para ver datos de tesorería o contacta a <b>@SentinelFleetOps</b>."
             )
 
         elif cmd in ("/ayuda", "/help"):
@@ -434,7 +526,7 @@ class TelegramSentinelBot:
                 "• <code>/status</code> - Estatus del sistema y telemetría BSC en vivo.\n"
                 "• <code>/pools</code> - Lista de pools monitoreados.\n"
                 "• <code>/monitorear &lt;0xDireccion&gt;</code> - Agregar pool a monitorear (Pro/Enterprise).\n"
-                "• <code>/upgrade &lt;PRO|ENTERPRISE&gt;</code> - Gestionar nivel de suscripción.\n"
+                "• <code>/upgrade</code> - Instrucciones para activar suscripción.\n"
                 "• <code>/simular</code> - Demostración de alerta de ataque.\n"
                 "• <code>/alertas</code> - Ver últimas alertas registradas.\n"
                 "• <code>/planes</code> - Precios y suscripciones mensuales."
@@ -443,18 +535,15 @@ class TelegramSentinelBot:
         return "Comando no reconocido. Escribe /ayuda para ver las opciones disponibles."
 
     def poll_updates_once(self) -> List[Dict[str, Any]]:
-        """Queries Telegram getUpdates once and dispatches handlers."""
+        """Queries Telegram getUpdates once and dispatches handlers using verified SSL."""
         if not self.api_base:
             return []
 
         url = f"{self.api_base}/getUpdates?offset={self.last_update_id + 1}&timeout=2"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "SentinelFleetBot/2.0"})
-            try:
-                resp = urllib.request.urlopen(req, timeout=5, context=ssl.create_default_context())
-            except Exception:
-                resp = urllib.request.urlopen(req, timeout=5, context=ssl._create_unverified_context())
-            with resp as response:
+            req = urllib.request.Request(url, headers={"User-Agent": "SentinelFleetBot/2.1"})
+            ctx = get_verified_ssl_context()
+            with urllib.request.urlopen(req, timeout=5, context=ctx) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
                     results = data.get("result", [])
@@ -485,14 +574,17 @@ if __name__ == "__main__":
     bot = TelegramSentinelBot(bot_token=token)
     
     if token:
-        print(f"[+] Bot inicializado con Token real. Conectando a Telegram...")
-        print("[+] Modo de escucha activo (presiona Ctrl+C para salir)...")
+        print("[+] Bot inicializado con Token real. Conectando a Telegram...")
+        print("[+] Iniciando hilo sensor daemon de monitoreo BSC en vivo...")
+        bot.start_monitoring_daemon()
+        print("[+] Modo de escucha y sensor activo (presiona Ctrl+C para salir)...")
         try:
             while True:
                 bot.poll_updates_once()
                 time.sleep(1.5)
         except KeyboardInterrupt:
-            print("\n[-] Bot detenido por el usuario.")
+            bot.stop_monitoring()
+            print("\n[-] Bot y sensor detenidos por el usuario.")
     else:
         print("[!] No se detectó TELEGRAM_BOT_TOKEN en variables de entorno.")
         print("[+] Ejecutando en Modo Simulación Local (Dry-Run Test)...")

@@ -28,6 +28,22 @@ BSC_DEFAULT_RPC_ENDPOINTS = [
 ]
 
 
+import ssl
+
+def get_verified_ssl_context():
+    """Returns cryptographic SSL context verifying CA certs via certifi or SSL_CERT_FILE."""
+    cafile = os.environ.get("SSL_CERT_FILE")
+    if not cafile:
+        try:
+            import certifi
+            cafile = certifi.where()
+        except Exception:
+            cafile = None
+    if cafile and os.path.exists(cafile):
+        return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
+
+
 class BSCMempoolWatcher:
     """
     Real-time on-chain invariant sensor for BNB Smart Chain and opBNB.
@@ -35,7 +51,7 @@ class BSCMempoolWatcher:
     Maintains zero hardcoded block constants or fabricated reserves.
     """
 
-    def __init__(self, chain_id: int = 56, rpc_url: Optional[str] = None):
+    def __init__(self, chain_id: int = 56, rpc_url: Optional[str] = None, auto_sync: bool = True):
         self.chain_id = chain_id
         self.rpc_url = rpc_url or BSC_DEFAULT_RPC_ENDPOINTS[0]
         self.gas_engine = BNBGasEngine(chain_id=chain_id, priority_multiplier=1.35, rpc_url=self.rpc_url)
@@ -62,9 +78,10 @@ class BSCMempoolWatcher:
             }
         }
 
-        # Attempt initial on-chain block & pool sync
-        self.sync_latest_block()
-        self.sync_pool_onchain("PancakeSwap_v3_WBNB_USDT")
+        # Attempt initial on-chain block & pool sync if auto_sync enabled
+        if auto_sync:
+            self.sync_latest_block()
+            self.sync_pool_onchain("PancakeSwap_v3_WBNB_USDT")
 
     # =========================================================================
     # 1. Real JSON-RPC Client Execution Engine
@@ -81,6 +98,7 @@ class BSCMempoolWatcher:
 
         candidate_endpoints = [self.rpc_url] + [e for e in BSC_DEFAULT_RPC_ENDPOINTS if e != self.rpc_url]
 
+        ctx = get_verified_ssl_context()
         for endpoint in candidate_endpoints:
             try:
                 req = urllib.request.Request(
@@ -89,7 +107,7 @@ class BSCMempoolWatcher:
                     headers={"Content-Type": "application/json", "User-Agent": "SentinelWatcher/2.0"},
                     method="POST"
                 )
-                with urllib.request.urlopen(req, timeout=4) as resp:
+                with urllib.request.urlopen(req, timeout=4, context=ctx) as resp:
                     if resp.status == 200:
                         data = json.loads(resp.read().decode("utf-8"))
                         if "result" in data:
@@ -302,7 +320,7 @@ class BSCMempoolWatcher:
             "activeRpc": self.rpc_url,
             "gas": gas_info,
             "privateRelay": {
-                "active": True,
+                "active": bool(self.private_relay.api_key),
                 "provider": self.private_relay.preferred_gateway,
                 "status": "RELAY_STANDBY_DRY_RUN" if not self.private_relay.api_key else "RELAY_ONLINE"
             },
@@ -310,7 +328,7 @@ class BSCMempoolWatcher:
             "recentIncidents": self.incidents[-5:]
         }
 
-    def simulate_attack_and_mitigate(self, pool_key: str = "PancakeSwap_v3_WBNB_USDT") -> dict:
+    def simulate_attack_and_mitigate(self, pool_key: str = "PancakeSwap_v3_WBNB_USDT", auto_reset_after_ms: bool = False) -> dict:
         """
         Executes mathematically exact attack simulation for formal verification and dry-run testing.
         Simulates 26% sudden quadratic price drop and checks invariant violation.
@@ -324,12 +342,12 @@ class BSCMempoolWatcher:
         simulated_drop_bps = 2600
         pool["status"] = "EMERGENCY_PAUSED"
 
-        elapsed_ms = round((time.perf_counter() - t0) * 1000 + 0.8, 2)
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
 
         incident = {
             "timestamp": int(time.time()),
             "chain": "BNB Chain (Chain ID 56)",
-            "block": self.last_known_block or 42_891_205,
+            "block": self.last_known_block or 0,
             "pool": pool_key,
             "poolAddress": pool["address"],
             "dropBps": simulated_drop_bps,
@@ -342,6 +360,8 @@ class BSCMempoolWatcher:
             "isSimulation": True
         }
         self.incidents.append(incident)
+        if auto_reset_after_ms:
+            self.reset_pool(pool_key)
         return incident
 
     def reset_pool(self, pool_key: str = "PancakeSwap_v3_WBNB_USDT"):
