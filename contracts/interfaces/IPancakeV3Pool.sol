@@ -63,6 +63,8 @@ interface IPancakeV3Pool {
             int56[] memory tickCumulatives,
             uint160[] memory secondsPerLiquidityCumulativeX128s
         );
+
+    function increaseObservationCardinalityNext(uint16 observationCardinalityNext) external;
 }
 
 /// @title IPancakeV3MintCallback - Callback for minting concentrated liquidity on PancakeSwap v3

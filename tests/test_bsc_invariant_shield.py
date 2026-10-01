@@ -167,6 +167,16 @@ class MockBNBProtectedPoolReceiver:
         self.paused = False
         self.emergency_wind_down_active = False
 
+    def restore_retreated_liquidity(self, caller: str):
+        assert caller == self.liquidity_manager, "NOT_LIQUIDITY_MANAGER"
+        assert not self.paused, "POOL_IS_PAUSED"
+        assert self.retreated_liquidity > 0, "NO_RETREATED_LIQUIDITY"
+        liq = self.retreated_liquidity
+        self.retreated_liquidity = 0
+        self.own_position_liquidity += liq
+        self.target_pool.pool_liquidity += liq
+        return liq
+
     def emergency_wind_down(self, caller: str):
         assert caller == self.circuit_breaker, "NOT_CIRCUIT_BREAKER"
         self.paused = True
@@ -306,7 +316,11 @@ class MockBNBInvariantShield:
         curr_liq = config["pool"].liquidity()
 
         assert curr_sqrt_p >= (config["high_water_mark_sqrt_p"] * 98) // 100, "PRICE_NOT_RESTORED"
-        assert curr_liq >= (config["high_water_mark_liq"] * 9) // 10, "LIQUIDITY_NOT_RESTORED"
+
+        # N-1 Fix: Effective liquidity includes active pool liquidity + capital safely sheltered in receiver
+        sheltered_liq = config["receiver"].retreated_liquidity
+        total_effective_liq = curr_liq + sheltered_liq
+        assert total_effective_liq >= (config["high_water_mark_liq"] * 9) // 10, "LIQUIDITY_NOT_RESTORED"
 
         config["state"] = "NORMAL"
         config["initial_sqrt_p"] = curr_sqrt_p
@@ -644,6 +658,46 @@ def test_16_oracle_rally_confirmation_defeats_30min_slow_pump():
     except AssertionError as e:
         assert "ORACLE_NOT_CONFIRMING_RALLY" in str(e)
 
+def test_17_auto_recover_with_retreated_capital_defeats_n1_deadlock():
+    """Verifies N-1: dominant LP paused -> retreat -> +5 min -> autoRecover succeeds via sheltered capital."""
+    token0 = MockBEP20Safe("WBNB")
+    token1 = MockBEP20Safe("USDT")
+    # Pool has 10M total liquidity, our receiver deposits 8M (dominant 80% LP)
+    pool = MockPancakeV3Pool(1000000, 78000, initial_liq=10_000_000)
+    receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xPancakePool", owner="0xAdmin")
+
+    token0.balances["0xAdmin"] = 80_000_000
+    token1.balances["0xAdmin"] = 160_000_000
+    receiver.deposit_liquidity("0xAdmin", 8_000_000, caller="0xAdmin")
+    assert receiver.own_position_liquidity == 8_000_000
+
+    shield = MockBNBInvariantShield(sentinel_bot="0x15C42d6E839182045f1248030fEF310b3cF3d74e", bnb_multisig="0xMultisig")
+    shield.register_target("0xPancakePool", pool, receiver, None, caller="0xMultisig")
+    assert shield.targets["0xPancakePool"]["high_water_mark_liq"] == 10_000_000
+
+    # Transient dump: pool price drops 18% -> pause triggered
+    pool.sqrt_price_x96 = 850000
+    shield.trigger_emergency_pause("0xPancakePool", current_time=1000, caller="0x15C42d6E839182045f1248030fEF310b3cF3d74e")
+    assert receiver.paused is True
+    # Capital retreated to vault: pool.liquidity dropped from 10M to 2M (80% drained by safe retreat!)
+    assert pool.pool_liquidity == 2_000_000
+    assert receiver.retreated_liquidity == 8_000_000
+
+    # Market price restores to 99.5% of HWM
+    pool.sqrt_price_x96 = 995000
+
+    # Without N-1 fix: pool.liquidity (2M) < 9M (90% of 10M HWM) -> would DEADLOCK and REVERT!
+    # With N-1 fix: totalEffectiveLiquidity = 2M (pool) + 8M (vault) = 10M >= 9M -> SUCCEEDS!
+    shield.auto_recover_if_healthy("0xPancakePool", caller="0x15C42d6E839182045f1248030fEF310b3cF3d74e")
+    assert shield.targets["0xPancakePool"]["state"] == "NORMAL"
+    assert receiver.paused is False
+
+    # Once unpaused, manager successfully restores retreated liquidity
+    restored = receiver.restore_retreated_liquidity(caller="0xAdmin")
+    assert restored == 8_000_000
+    assert receiver.own_position_liquidity == 8_000_000
+    assert pool.pool_liquidity == 10_000_000
+
 if __name__ == "__main__":
     suite = [
         test_1_exact_512bit_quadratic_math,
@@ -662,6 +716,7 @@ if __name__ == "__main__":
         test_14_deposit_flow_and_own_position_liquidity_burn,
         test_15_emergency_capital_retreat_active_safeguard,
         test_16_oracle_rally_confirmation_defeats_30min_slow_pump,
+        test_17_auto_recover_with_retreated_capital_defeats_n1_deadlock,
     ]
     print(f"Executing {len(suite)} formal verification tests for BNB Invariant Shield...")
     for test in suite:

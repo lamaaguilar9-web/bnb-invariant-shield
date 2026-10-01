@@ -6,7 +6,7 @@ import "./interfaces/IPancakeV3Pool.sol";
 
 /// @title BNBProtectedPoolReceiver - Production-Grade Concentrated Liquidity Vault & Safe Exit Hook
 /// @notice Manages PancakeSwap v3 LP positions with atomic circuit breaker pauses and non-custodial emergency wind-down
-/// @dev Hardened against Reentrancy (H-R1), Global Liquidity Share Overburn (H-R2), Unbacked Mints (H-R3), and Emergency Capital Evacuation (B-5)
+/// @dev Hardened against Reentrancy (H-R1), Global Liquidity Share Overburn (H-R2), Unbacked Mints (H-R3), Capital Evacuation (B-5), and Drift Deadlock (N-2)
 contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
     address public immutable targetPool;
     address public immutable token0;
@@ -126,19 +126,20 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
         emit EmergencyUnpaused();
     }
 
-    /// @notice Re-deploys sheltered liquidity back into PancakeSwap v3 once crisis is safely resolved
+    /// @notice N-2: Re-deploys sheltered liquidity back into PancakeSwap v3 once crisis is safely resolved
+    /// @dev Payer (msg.sender) covers any composition drift between retreat and restore ticks
     function restoreRetreatedLiquidity() external onlyLiquidityManager whenNotPaused nonReentrant returns (uint256 amount0, uint256 amount1) {
         require(retreatedLiquidity > 0, "NO_RETREATED_LIQUIDITY");
         uint128 liq = retreatedLiquidity;
         retreatedLiquidity = 0;
 
-        // Uses pre-funded tokens currently sheltered in address(this)
+        // B-1 & N-2: Pass msg.sender so callback can top-up any price drift deficit via transferFrom
         (amount0, amount1) = IPancakeV3Pool(targetPool).mint(
             address(this),
             tickLower,
             tickUpper,
             liq,
-            "" // Empty data triggers pre-funded branch in callback
+            abi.encode(msg.sender)
         );
 
         ownPositionLiquidity += liq;
@@ -160,7 +161,6 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
         require(user != address(0), "INVALID_USER");
         require(liquidityAmount > 0, "INVALID_LIQUIDITY_AMOUNT");
 
-        // B-1: Encode msg.sender (liquidity manager or vault) as payer for callback
         (amount0, amount1) = IPancakeV3Pool(targetPool).mint(
             address(this),
             tickLower,
@@ -177,6 +177,7 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
     }
 
     /// @notice PancakeSwap v3 mint callback to transfer tokens owed during liquidity creation
+    /// @dev N-2: Uses sheltered vault balances first, then draws any deficit from payer
     function pancakeV3MintCallback(
         uint256 amount0Owed,
         uint256 amount1Owed,
@@ -186,11 +187,30 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
 
         if (data.length == 32) {
             address payer = abi.decode(data, (address));
+            uint256 bal0 = IBEP20(token0).balanceOf(address(this));
+            uint256 bal1 = IBEP20(token1).balanceOf(address(this));
+
             if (amount0Owed > 0) {
-                require(IBEP20(token0).transferFrom(payer, msg.sender, amount0Owed), "PULL_TOKEN0_FAILED");
+                if (bal0 >= amount0Owed) {
+                    require(IBEP20(token0).transfer(msg.sender, amount0Owed), "TRANSFER0_FAILED");
+                } else {
+                    if (bal0 > 0) {
+                        require(IBEP20(token0).transfer(msg.sender, bal0), "TRANSFER0_PARTIAL_FAILED");
+                    }
+                    uint256 remaining0 = amount0Owed - bal0;
+                    require(IBEP20(token0).transferFrom(payer, msg.sender, remaining0), "PULL_TOKEN0_FAILED");
+                }
             }
             if (amount1Owed > 0) {
-                require(IBEP20(token1).transferFrom(payer, msg.sender, amount1Owed), "PULL_TOKEN1_FAILED");
+                if (bal1 >= amount1Owed) {
+                    require(IBEP20(token1).transfer(msg.sender, amount1Owed), "TRANSFER1_FAILED");
+                } else {
+                    if (bal1 > 0) {
+                        require(IBEP20(token1).transfer(msg.sender, bal1), "TRANSFER1_PARTIAL_FAILED");
+                    }
+                    uint256 remaining1 = amount1Owed - bal1;
+                    require(IBEP20(token1).transferFrom(payer, msg.sender, remaining1), "PULL_TOKEN1_FAILED");
+                }
             }
         } else {
             if (amount0Owed > 0) {

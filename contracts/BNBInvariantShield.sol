@@ -19,6 +19,7 @@ contract BNBInvariantShield {
     uint256 public constant HWM_UPDATE_COOLDOWN = 60 seconds;
     uint32 public constant TWAP_WINDOW = 1800; // 30 minutes
     int24 public constant MAX_TWAP_TICK_DEVIATION = 200; // ~2% max price deviation between spot and 30m TWAP
+    int24 public constant STRICT_ORACLELESS_TWAP_DEVIATION = 100; // ~1% strict TWAP deviation for pools lacking Chainlink oracle
     uint256 public constant EMERGENCY_TIMEOUT = 24 hours;
     uint256 public constant DEFAULT_MAX_DEVIATION_BPS = 1500; // 15% price drop
     int24 public constant DEFAULT_MAX_TICK_DELTA = 1625;      // ~15% tick deviation
@@ -110,6 +111,9 @@ contract BNBInvariantShield {
         require(poolReceiver.code.length > 0, "INVALID_RECEIVER_CODE");
         require(!targets[targetPool].isRegistered, "ALREADY_REGISTERED");
 
+        // N-3: Ensure pool observation cardinality covers 30-minute TWAP window
+        try IPancakeV3Pool(targetPool).increaseObservationCardinalityNext(60) {} catch {}
+
         (uint160 sqrtPriceX96, int24 tick,,,,,) = IPancakeV3Pool(targetPool).slot0();
         require(sqrtPriceX96 > 0, "INVALID_SQRT_PRICE");
         uint128 poolLiquidity = IPancakeV3Pool(targetPool).liquidity();
@@ -117,7 +121,7 @@ contract BNBInvariantShield {
 
         // H-S1: Validate spot matches TWAP at registration to defeat pre-registration flash pumps
         int24 regTwapTick = getTwapTick(targetPool, TWAP_WINDOW);
-        int24 regTickDiff = tick > regTwapTick ? tick - regTwapTick : regTwapTick - tick;
+        int24 regTickDiff = tick > regTwapTick ? tick - regTwapTick : regTickDiff - tick;
         require(regTickDiff <= MAX_TWAP_TICK_DEVIATION, "REGISTRATION_SPOT_DEVIATES_FROM_TWAP");
 
         // B-4: Mandatory wiring validation (never optional)
@@ -170,21 +174,23 @@ contract BNBInvariantShield {
         // H-S1: Mathematical TWAP validation against 30-minute time-weighted average
         int24 twapTick = getTwapTick(targetPool, TWAP_WINDOW);
         int24 tickDiff = currentTick > twapTick ? currentTick - twapTick : twapTick - currentTick;
-        require(tickDiff <= MAX_TWAP_TICK_DEVIATION, "SPOT_DEVIATES_FROM_TWAP");
 
-        // B-2: Active Oracle cross-validation. If pool price rises, oracle MUST confirm the rise.
+        // B-2 & Residual: Active Oracle cross-validation. If no oracle feed, enforce strict 1% TWAP bound.
         if (config.oracleFeed != address(0)) {
+            require(tickDiff <= MAX_TWAP_TICK_DEVIATION, "SPOT_DEVIATES_FROM_TWAP");
+
             (, int256 oraclePrice,, uint256 updatedAt,) = IAggregatorV3(config.oracleFeed).latestRoundData();
             require(oraclePrice > 0, "INVALID_ORACLE_PRICE");
             require(block.timestamp - updatedAt <= 1 hours, "STALE_ORACLE_PRICE");
             
             if (currentSqrtPriceX96 > config.highWaterMarkSqrtPriceX96 && config.highWaterMarkOraclePrice > 0) {
-                // Oracle must confirm the upward trend; cannot stay stagnant or drop during a pool rally
                 require(oraclePrice > config.highWaterMarkOraclePrice, "ORACLE_NOT_CONFIRMING_RALLY");
             }
             if (oraclePrice > config.highWaterMarkOraclePrice) {
                 config.highWaterMarkOraclePrice = oraclePrice;
             }
+        } else {
+            require(tickDiff <= STRICT_ORACLELESS_TWAP_DEVIATION, "STRICT_TWAP_DEVIATION_FOR_ORACLELESS_POOL");
         }
 
         bool updated = false;
@@ -266,7 +272,7 @@ contract BNBInvariantShield {
         config.state = PoolState.PAUSED;
         config.lastPauseTimestamp = block.timestamp;
 
-        // Triggers emergencyPause on receiver (which executes B-5 emergency capital retreat)
+        // Triggers emergencyPause on receiver (executes B-5 active emergency capital retreat)
         (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyPause()"));
         require(success, "WRAPPER_PAUSE_FAILED");
 
@@ -274,6 +280,7 @@ contract BNBInvariantShield {
     }
 
     /// @notice Automated recovery for transient volatility or benign flash-loan noise
+    /// @dev N-1: Evaluates total effective capital (pool liquidity + sheltered vault liquidity) to prevent retreat deadlock
     function autoRecoverIfHealthy(address targetPool) external onlyRole(PAUSER_ROLE) {
         TargetConfig storage config = targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
@@ -283,11 +290,20 @@ contract BNBInvariantShield {
         (uint160 currentSqrtPriceX96, int24 currentTick,,,,,) = IPancakeV3Pool(targetPool).slot0();
         uint128 currentLiquidity = IPancakeV3Pool(targetPool).liquidity();
 
+        // Invariant health check: price within 2% of HWM
         uint160 minHealthyPrice = uint160((uint256(config.highWaterMarkSqrtPriceX96) * 98) / 100);
         require(currentSqrtPriceX96 >= minHealthyPrice, "PRICE_NOT_RESTORED");
 
+        // N-1 Fix: Effective liquidity includes active pool liquidity + capital safely sheltered in receiver during pause
+        uint128 shelteredLiquidity = 0;
+        (bool sRetreat, bytes memory rRetreat) = config.poolReceiver.staticcall(abi.encodeWithSignature("retreatedLiquidity()"));
+        if (sRetreat && rRetreat.length == 32) {
+            shelteredLiquidity = abi.decode(rRetreat, (uint128));
+        }
+        uint256 totalEffectiveLiquidity = uint256(currentLiquidity) + uint256(shelteredLiquidity);
+
         uint128 anchorLiq = config.highWaterMarkLiquidity > 0 ? config.highWaterMarkLiquidity : config.initialLiquidity;
-        require(uint256(currentLiquidity) >= (uint256(anchorLiq) * 9) / 10, "LIQUIDITY_NOT_RESTORED");
+        require(totalEffectiveLiquidity >= (uint256(anchorLiq) * 9) / 10, "LIQUIDITY_NOT_RESTORED");
 
         config.state = PoolState.NORMAL;
         config.initialSqrtPriceX96 = currentSqrtPriceX96;
