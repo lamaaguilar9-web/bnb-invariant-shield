@@ -19,7 +19,7 @@ contract BNBInvariantShield {
     uint256 public constant HWM_UPDATE_COOLDOWN = 60 seconds;
     uint32 public constant TWAP_WINDOW = 1800; // 30 minutes
     int24 public constant MAX_TWAP_TICK_DEVIATION = 200; // ~2% max price deviation between spot and 30m TWAP
-    int24 public constant STRICT_ORACLELESS_TWAP_DEVIATION = 100; // ~1% strict TWAP deviation for pools lacking Chainlink oracle
+    int24 public constant STRICT_ORACLELESS_TWAP_DEVIATION = 100; // ~1% strict TWAP deviation for oracleless pools
     uint256 public constant EMERGENCY_TIMEOUT = 24 hours;
     uint256 public constant DEFAULT_MAX_DEVIATION_BPS = 1500; // 15% price drop
     int24 public constant DEFAULT_MAX_TICK_DELTA = 1625;      // ~15% tick deviation
@@ -45,7 +45,13 @@ contract BNBInvariantShield {
         uint256 maxDrainBps;
     }
 
-    mapping(address => TargetConfig) public targets;
+    mapping(address => TargetConfig) private _targets;
+
+    /// @notice Returns the full TargetConfig struct for a registered pool
+    /// @dev Returns struct in memory to avoid EVM 16-slot stack overflow in ABI encoding
+    function targets(address pool) external view returns (TargetConfig memory) {
+        return _targets[pool];
+    }
 
     event TargetRegistered(address indexed targetPool, address indexed poolReceiver, address oracleFeed);
     event HighWaterMarkUpdated(address indexed targetPool, uint160 newHwmSqrtPriceX96, uint128 newHwmLiquidity);
@@ -102,6 +108,7 @@ contract BNBInvariantShield {
     }
 
     /// @notice Register a PancakeSwap v3 pool or Venus market under invariant protection
+    /// @dev Stack-optimized: scopes local variables to avoid "Stack too deep"
     function registerTarget(
         address targetPool,
         address poolReceiver,
@@ -109,53 +116,54 @@ contract BNBInvariantShield {
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(targetPool != address(0) && poolReceiver != address(0), "INVALID_ADDRESS");
         require(poolReceiver.code.length > 0, "INVALID_RECEIVER_CODE");
-        require(!targets[targetPool].isRegistered, "ALREADY_REGISTERED");
+        require(!_targets[targetPool].isRegistered, "ALREADY_REGISTERED");
 
-        // N-3: Ensure pool observation cardinality covers 30-minute TWAP window
-        try IPancakeV3Pool(targetPool).increaseObservationCardinalityNext(60) {} catch {}
-
-        (uint160 sqrtPriceX96, int24 tick,,,,,) = IPancakeV3Pool(targetPool).slot0();
-        require(sqrtPriceX96 > 0, "INVALID_SQRT_PRICE");
-        uint128 poolLiquidity = IPancakeV3Pool(targetPool).liquidity();
-        require(poolLiquidity > 0, "POOL_HAS_NO_LIQUIDITY");
-
-        // H-S1: Validate spot matches TWAP at registration to defeat pre-registration flash pumps
-        int24 regTwapTick = getTwapTick(targetPool, TWAP_WINDOW);
-        int24 regTickDiff = tick > regTwapTick ? tick - regTwapTick : regTickDiff - tick;
-        require(regTickDiff <= MAX_TWAP_TICK_DEVIATION, "REGISTRATION_SPOT_DEVIATES_FROM_TWAP");
+        // N-3: Ensure pool observation cardinality covers 30-minute TWAP window (2400 blocks on BSC)
+        try IPancakeV3Pool(targetPool).increaseObservationCardinalityNext(2400) {} catch {}
 
         // B-4: Mandatory wiring validation (never optional)
-        (bool s1, bytes memory r1) = poolReceiver.staticcall(abi.encodeWithSignature("targetPool()"));
-        require(s1 && r1.length == 32, "RECEIVER_LACKS_TARGET_POOL");
-        require(abi.decode(r1, (address)) == targetPool, "MISMATCHED_TARGET_POOL");
+        {
+            (bool s1, bytes memory r1) = poolReceiver.staticcall(abi.encodeWithSignature("targetPool()"));
+            require(s1 && r1.length == 32 && abi.decode(r1, (address)) == targetPool, "MISMATCHED_TARGET_POOL");
 
-        (bool s2, bytes memory r2) = poolReceiver.staticcall(abi.encodeWithSignature("circuitBreaker()"));
-        require(s2 && r2.length == 32, "RECEIVER_LACKS_CIRCUIT_BREAKER");
-        require(abi.decode(r2, (address)) == address(this), "MISMATCHED_CIRCUIT_BREAKER");
-
-        int256 initOraclePrice = 0;
-        if (oracleFeed != address(0)) {
-            (, initOraclePrice,,,) = IAggregatorV3(oracleFeed).latestRoundData();
-            require(initOraclePrice > 0, "INVALID_ORACLE_PRICE");
+            (bool s2, bytes memory r2) = poolReceiver.staticcall(abi.encodeWithSignature("circuitBreaker()"));
+            require(s2 && r2.length == 32 && abi.decode(r2, (address)) == address(this), "MISMATCHED_CIRCUIT_BREAKER");
         }
 
-        targets[targetPool] = TargetConfig({
-            isRegistered: true,
-            state: PoolState.NORMAL,
-            poolReceiver: poolReceiver,
-            oracleFeed: oracleFeed,
-            initialSqrtPriceX96: sqrtPriceX96,
-            highWaterMarkSqrtPriceX96: sqrtPriceX96,
-            highWaterMarkOraclePrice: initOraclePrice,
-            initialLiquidity: poolLiquidity,
-            highWaterMarkLiquidity: poolLiquidity,
-            initialTick: tick,
-            lastPauseTimestamp: 0,
-            lastHwmUpdateTimestamp: block.timestamp,
-            maxDeviationBps: DEFAULT_MAX_DEVIATION_BPS,
-            maxTickDelta: DEFAULT_MAX_TICK_DELTA,
-            maxDrainBps: DEFAULT_MAX_DRAIN_BPS
-        });
+        TargetConfig storage config = _targets[targetPool];
+        config.isRegistered = true;
+        config.state = PoolState.NORMAL;
+        config.poolReceiver = poolReceiver;
+        config.oracleFeed = oracleFeed;
+        config.maxDeviationBps = DEFAULT_MAX_DEVIATION_BPS;
+        config.maxTickDelta = DEFAULT_MAX_TICK_DELTA;
+        config.maxDrainBps = DEFAULT_MAX_DRAIN_BPS;
+        config.lastHwmUpdateTimestamp = block.timestamp;
+
+        // Scoped slot0 and TWAP validation
+        {
+            (uint160 sqrtPriceX96, int24 tick,,,,,) = IPancakeV3Pool(targetPool).slot0();
+            require(sqrtPriceX96 > 0, "INVALID_SQRT_PRICE");
+            uint128 poolLiquidity = IPancakeV3Pool(targetPool).liquidity();
+            require(poolLiquidity > 0, "POOL_HAS_NO_LIQUIDITY");
+
+            // H-S1: Validate spot matches TWAP at registration
+            int24 regTwapTick = getTwapTick(targetPool, TWAP_WINDOW);
+            int24 regTickDiff = tick > regTwapTick ? tick - regTwapTick : regTwapTick - tick;
+            require(regTickDiff <= MAX_TWAP_TICK_DEVIATION, "REGISTRATION_SPOT_DEVIATES_FROM_TWAP");
+
+            config.initialSqrtPriceX96 = sqrtPriceX96;
+            config.highWaterMarkSqrtPriceX96 = sqrtPriceX96;
+            config.initialLiquidity = poolLiquidity;
+            config.highWaterMarkLiquidity = poolLiquidity;
+            config.initialTick = tick;
+        }
+
+        if (oracleFeed != address(0)) {
+            (, int256 initOraclePrice,,,) = IAggregatorV3(oracleFeed).latestRoundData();
+            require(initOraclePrice > 0, "INVALID_ORACLE_PRICE");
+            config.highWaterMarkOraclePrice = initOraclePrice;
+        }
 
         emit TargetRegistered(targetPool, poolReceiver, oracleFeed);
     }
@@ -163,7 +171,7 @@ contract BNBInvariantShield {
     /// @notice Updates the High-Water Mark with 30-minute TWAP and active Chainlink Oracle validation
     /// @dev B-2: Rejects sustained price manipulations if Chainlink oracle fails to confirm price increase
     function updateHighWaterMark(address targetPool) external onlyRole(PAUSER_ROLE) {
-        TargetConfig storage config = targets[targetPool];
+        TargetConfig storage config = _targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.NORMAL, "NOT_NORMAL");
         require(block.timestamp >= config.lastHwmUpdateTimestamp + HWM_UPDATE_COOLDOWN, "HWM_COOLDOWN_ACTIVE");
@@ -219,7 +227,7 @@ contract BNBInvariantShield {
         int24 maxTickDelta,
         uint256 maxDrainBps
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        TargetConfig storage config = targets[targetPool];
+        TargetConfig storage config = _targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(maxDeviationBps >= 2 && maxDeviationBps <= 10000, "INVALID_BPS_RANGE");
         require(maxTickDelta > 0, "INVALID_TICK_DELTA");
@@ -233,7 +241,7 @@ contract BNBInvariantShield {
 
     /// @notice Triggers emergency circuit breaker pause if and only if on-chain invariant breach is mathematically verified
     function triggerEmergencyPause(address targetPool) external onlyRole(PAUSER_ROLE) {
-        TargetConfig storage config = targets[targetPool];
+        TargetConfig storage config = _targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.NORMAL, "NOT_NORMAL");
         require(block.timestamp >= config.lastPauseTimestamp + PAUSE_COOLDOWN, "PAUSE_COOLDOWN_ACTIVE");
@@ -282,7 +290,7 @@ contract BNBInvariantShield {
     /// @notice Automated recovery for transient volatility or benign flash-loan noise
     /// @dev N-1: Evaluates total effective capital (pool liquidity + sheltered vault liquidity) to prevent retreat deadlock
     function autoRecoverIfHealthy(address targetPool) external onlyRole(PAUSER_ROLE) {
-        TargetConfig storage config = targets[targetPool];
+        TargetConfig storage config = _targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.PAUSED, "NOT_PAUSED");
         require(block.timestamp >= config.lastPauseTimestamp + 5 minutes, "COOLDOWN_ACTIVE");
@@ -321,7 +329,7 @@ contract BNBInvariantShield {
         uint160 minAcceptableSqrtPrice,
         uint256 maxOracleAge
     ) external onlyRole(UNPAUSER_ROLE) {
-        TargetConfig storage config = targets[targetPool];
+        TargetConfig storage config = _targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.PAUSED, "NOT_PAUSED");
 
@@ -350,7 +358,7 @@ contract BNBInvariantShield {
 
     /// @notice Triggers 24-hour emergency wind-down if governance fails to resolve crisis within 24h
     function activateEmergencyWindDown(address targetPool) external {
-        TargetConfig storage config = targets[targetPool];
+        TargetConfig storage config = _targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.PAUSED, "NOT_PAUSED");
         require(block.timestamp >= config.lastPauseTimestamp + EMERGENCY_TIMEOUT, "TIMEOUT_NOT_REACHED");
@@ -376,7 +384,7 @@ contract BNBInvariantShield {
 
     /// @notice Governance restoration path from Emergency Wind-Down if crisis is resolved
     function governanceRestoreFromWindDown(address targetPool) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        TargetConfig storage config = targets[targetPool];
+        TargetConfig storage config = _targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.EMERGENCY_WIND_DOWN, "NOT_WIND_DOWN");
 

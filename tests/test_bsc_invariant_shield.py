@@ -120,6 +120,7 @@ class MockBNBProtectedPoolReceiver:
         self.paused = False
         self.emergency_wind_down_active = False
         self.locked = False
+        self.active_mint_payer = None
         self.own_position_liquidity = 0
         self.retreated_liquidity = 0
         self.lp_balances = {}
@@ -139,11 +140,16 @@ class MockBNBProtectedPoolReceiver:
         assert not self.locked, "REENTRANCY_GUARD: REENTRANT_CALL"
         self.locked = True
 
+        # Pass 6 Guard: Authorize mint callback exclusively for caller
+        self.active_mint_payer = caller
+
         # B-1: Pull tokens from caller (payer) via callback
         amount0 = liquidity_amount * 10
         amount1 = liquidity_amount * 20
         self.token0.transfer(caller, "pool_address", amount0)
         self.token1.transfer(caller, "pool_address", amount1)
+
+        self.active_mint_payer = None
 
         self.own_position_liquidity += liquidity_amount
         self.lp_balances[user] = self.lp_balances.get(user, 0) + liquidity_amount
@@ -151,6 +157,12 @@ class MockBNBProtectedPoolReceiver:
 
         self.locked = False
         return (amount0, amount1)
+
+    def pancake_v3_mint_callback(self, caller: str, payer: str, amount0_owed: int, amount1_owed: int):
+        assert caller == "pool_address", "ONLY_TARGET_POOL_CALLBACK"
+        assert self.active_mint_payer is not None, "UNAUTHORIZED_MINT_CALLBACK"
+        assert payer == self.active_mint_payer, "UNAUTHORIZED_PAYER"
+        return True
 
     def emergency_pause(self, caller: str):
         assert caller == self.circuit_breaker, "NOT_CIRCUIT_BREAKER"
@@ -173,8 +185,11 @@ class MockBNBProtectedPoolReceiver:
         assert self.retreated_liquidity > 0, "NO_RETREATED_LIQUIDITY"
         liq = self.retreated_liquidity
         self.retreated_liquidity = 0
+
+        self.active_mint_payer = caller
         self.own_position_liquidity += liq
         self.target_pool.pool_liquidity += liq
+        self.active_mint_payer = None
         return liq
 
     def emergency_wind_down(self, caller: str):
@@ -183,10 +198,19 @@ class MockBNBProtectedPoolReceiver:
         self.emergency_wind_down_active = True
 
     def orderly_withdraw(self, user: str, lp_amount: int):
+        return self._execute_withdraw(user, lp_amount, allow_during_pause_or_wind_down=True)
+
+    def claim_remaining_lp(self, user: str, lp_amount: int):
+        return self._execute_withdraw(user, lp_amount, allow_during_pause_or_wind_down=False)
+
+    def _execute_withdraw(self, user: str, lp_amount: int, allow_during_pause_or_wind_down: bool = True):
         assert not self.locked, "REENTRANCY_GUARD: REENTRANT_CALL"
         self.locked = True
 
-        assert self.emergency_wind_down_active, "WIND_DOWN_NOT_ACTIVE"
+        if allow_during_pause_or_wind_down:
+            assert self.emergency_wind_down_active or self.paused, "WIND_DOWN_OR_PAUSE_NOT_ACTIVE"
+
+        assert lp_amount > 0, "INVALID_LP_AMOUNT"
         assert self.lp_balances.get(user, 0) >= lp_amount, "INSUFFICIENT_LP_BALANCE"
         assert self.total_lp_supply > 0, "ZERO_TOTAL_SUPPLY"
 
@@ -698,6 +722,65 @@ def test_17_auto_recover_with_retreated_capital_defeats_n1_deadlock():
     assert receiver.own_position_liquidity == 8_000_000
     assert pool.pool_liquidity == 10_000_000
 
+def test_18_active_mint_payer_defeats_third_party_callback_injection():
+    """Validates that third-party mint callback triggers are blocked by _activeMintPayer guard (Medio 1)."""
+    token0 = MockBEP20Safe("WBNB")
+    token1 = MockBEP20Safe("USDT")
+    pool = MockPancakeV3Pool(1000000, 78000, 10_000_000)
+    receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xAdmin", owner="0xAdmin")
+
+    # Attacker calls pancakeV3MintCallback directly without an active deposit/restore call
+    callback_blocked = False
+    try:
+        receiver.pancake_v3_mint_callback(caller="pool_address", payer="0xAttacker", amount0_owed=1000, amount1_owed=2000)
+    except AssertionError as err:
+        if "UNAUTHORIZED_MINT_CALLBACK" in str(err):
+            callback_blocked = True
+    assert callback_blocked is True, "Callback without internal active mint must revert"
+
+    # Attacker tries to impersonate another payer during an active call
+    receiver.active_mint_payer = "0xLegitManager"
+    spoof_blocked = False
+    try:
+        receiver.pancake_v3_mint_callback(caller="pool_address", payer="0xAttacker", amount0_owed=1000, amount1_owed=2000)
+    except AssertionError as err:
+        if "UNAUTHORIZED_PAYER" in str(err):
+            spoof_blocked = True
+    receiver.active_mint_payer = None
+    assert spoof_blocked is True, "Callback with spoofed payer must revert"
+
+def test_19_non_custodial_lp_redemption_post_governance_restoration():
+    """Validates that LPs who missed emergency wind-down can exit safely via claimRemainingLp (Medio 3 / N-4)."""
+    token0 = MockBEP20Safe("WBNB")
+    token1 = MockBEP20Safe("USDT")
+    pool = MockPancakeV3Pool(1000000, 78000, 10_000_000)
+    receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xAdmin", owner="0xAdmin")
+
+    token0.balances["0xAdmin"] = 10000
+    token1.balances["0xAdmin"] = 20000
+    token0.balances["wrapper_address"] = 100 * 10**18
+    token1.balances["wrapper_address"] = 60_000 * 10**18
+
+    # Deposit LP shares for a passive LP
+    receiver.deposit_liquidity("0xPassiveLP", 500, caller="0xAdmin")
+    assert receiver.lp_balances["0xPassiveLP"] == 500
+
+    # Pool goes into emergency wind-down
+    receiver.emergency_wind_down(caller="0xAdmin")
+    assert receiver.emergency_wind_down_active is True
+
+    # Governance later unpauses / restores the pool before 0xPassiveLP withdraws
+    receiver.emergency_unpause(caller="0xAdmin")
+    assert receiver.paused is False
+    assert receiver.emergency_wind_down_active is False
+
+    # Under old logic: orderlyWithdraw requires emergencyWindDownActive -> 0xPassiveLP was trapped!
+    # Under N-4 fix: claimRemainingLp allows non-custodial capital redemption even post-restoration
+    a0, a1 = receiver.claim_remaining_lp("0xPassiveLP", 500)
+    assert a0 > 0 and a1 > 0, "LP capital safely redeemed post-restoration"
+    assert receiver.lp_balances["0xPassiveLP"] == 0
+    assert receiver.total_lp_supply == 0
+
 if __name__ == "__main__":
     suite = [
         test_1_exact_512bit_quadratic_math,
@@ -717,6 +800,8 @@ if __name__ == "__main__":
         test_15_emergency_capital_retreat_active_safeguard,
         test_16_oracle_rally_confirmation_defeats_30min_slow_pump,
         test_17_auto_recover_with_retreated_capital_defeats_n1_deadlock,
+        test_18_active_mint_payer_defeats_third_party_callback_injection,
+        test_19_non_custodial_lp_redemption_post_governance_restoration,
     ]
     print(f"Executing {len(suite)} formal verification tests for BNB Invariant Shield...")
     for test in suite:

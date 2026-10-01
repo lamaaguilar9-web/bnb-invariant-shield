@@ -18,5 +18,8 @@
     "venus-protocol"
   ],
   "author": "Luis Aguilar (Sentinel Fleet Technologies)",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "solc": "^0.8.37"
+  }
 }
