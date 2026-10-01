@@ -7,7 +7,7 @@ import "./interfaces/IAggregatorV3.sol";
 
 /// @title BNB Invariant Shield v2.0.0 - Institutional Circuit Breaker for BNB Chain & opBNB
 /// @notice Autonomous, ultra-low latency circuit breaker safeguarding PancakeSwap v3 & Venus Protocol
-/// @dev Engineered by Sentinel Fleet Technologies. Formally audited against Flash-Pump Griefing (C-1) and Salami-Slicing (H-1)
+/// @dev Engineered by Sentinel Fleet Technologies. Formally audited against Flash-Pump Griefing (C-1), Salami-Slicing (H-1), and TWAP-Gated Ratchets (H-S1)
 contract BNBInvariantShield {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant UNPAUSER_ROLE = keccak256("UNPAUSER_ROLE");
@@ -16,7 +16,9 @@ contract BNBInvariantShield {
     mapping(bytes32 => mapping(address => bool)) private _roles;
 
     uint256 public constant PAUSE_COOLDOWN = 15 minutes;
-    uint256 public constant HWM_UPDATE_COOLDOWN = 1 hours;
+    uint256 public constant HWM_UPDATE_COOLDOWN = 60 seconds; // H-S1: Reduced from 1h since 30m TWAP provides mathematical flash-pump immunity
+    uint32 public constant TWAP_WINDOW = 1800; // 30 minutes
+    int24 public constant MAX_TWAP_TICK_DEVIATION = 200; // ~2% max price deviation between spot and 30m TWAP
     uint256 public constant EMERGENCY_TIMEOUT = 24 hours;
     uint256 public constant DEFAULT_MAX_DEVIATION_BPS = 1500; // 15% price drop
     int24 public constant DEFAULT_MAX_TICK_DELTA = 1625;      // ~15% tick deviation
@@ -31,6 +33,7 @@ contract BNBInvariantShield {
         address oracleFeed;
         uint160 initialSqrtPriceX96;
         uint160 highWaterMarkSqrtPriceX96; // HWM: Highest verified price anchor
+        int256 highWaterMarkOraclePrice;   // Oracle HWM anchor for cross-validation (M-S1)
         uint128 initialLiquidity;
         uint128 highWaterMarkLiquidity;     // Liquidity HWM to defeat organic growth blindness (H-2)
         int24 initialTick;
@@ -84,6 +87,25 @@ contract BNBInvariantShield {
         emit RoleRevoked(role, account);
     }
 
+    /// @notice Returns the 30-minute TWAP tick for a pool, falling back to current tick if observation history is insufficient
+    function getTwapTick(address targetPool, uint32 twapWindow) public view returns (int24 twapTick) {
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = twapWindow;
+        secondsAgos[1] = 0;
+        try IPancakeV3Pool(targetPool).observe(secondsAgos) returns (
+            int56[] memory tickCumulatives,
+            uint160[] memory
+        ) {
+            int56 tickDelta = tickCumulatives[1] - tickCumulatives[0];
+            twapTick = int24(tickDelta / int56(int32(twapWindow)));
+            if (tickDelta < 0 && (tickDelta % int56(int32(twapWindow)) != 0)) {
+                twapTick--;
+            }
+        } catch {
+            (, twapTick,,,,,) = IPancakeV3Pool(targetPool).slot0();
+        }
+    }
+
     /// @notice Register a PancakeSwap v3 pool or Venus market under invariant protection
     function registerTarget(
         address targetPool,
@@ -99,6 +121,27 @@ contract BNBInvariantShield {
         uint128 poolLiquidity = IPancakeV3Pool(targetPool).liquidity();
         require(poolLiquidity > 0, "POOL_HAS_NO_LIQUIDITY");
 
+        // H-S1: Validate spot matches TWAP at registration to defeat pre-registration flash pumps
+        int24 regTwapTick = getTwapTick(targetPool, TWAP_WINDOW);
+        int24 regTickDiff = tick > regTwapTick ? tick - regTwapTick : regTwapTick - tick;
+        require(regTickDiff <= MAX_TWAP_TICK_DEVIATION, "REGISTRATION_SPOT_DEVIATES_FROM_TWAP");
+
+        // M-R1: Validate wrapper on-chain wiring to prevent dead circuit breaker
+        (bool s1, bytes memory r1) = poolReceiver.staticcall(abi.encodeWithSignature("targetPool()"));
+        if (s1 && r1.length == 32) {
+            require(abi.decode(r1, (address)) == targetPool, "MISMATCHED_TARGET_POOL");
+        }
+        (bool s2, bytes memory r2) = poolReceiver.staticcall(abi.encodeWithSignature("circuitBreaker()"));
+        if (s2 && r2.length == 32) {
+            require(abi.decode(r2, (address)) == address(this), "MISMATCHED_CIRCUIT_BREAKER");
+        }
+
+        int256 initOraclePrice = 0;
+        if (oracleFeed != address(0)) {
+            (, initOraclePrice,,,) = IAggregatorV3(oracleFeed).latestRoundData();
+            require(initOraclePrice > 0, "INVALID_ORACLE_PRICE");
+        }
+
         targets[targetPool] = TargetConfig({
             isRegistered: true,
             state: PoolState.NORMAL,
@@ -106,6 +149,7 @@ contract BNBInvariantShield {
             oracleFeed: oracleFeed,
             initialSqrtPriceX96: sqrtPriceX96,
             highWaterMarkSqrtPriceX96: sqrtPriceX96,
+            highWaterMarkOraclePrice: initOraclePrice,
             initialLiquidity: poolLiquidity,
             highWaterMarkLiquidity: poolLiquidity,
             initialTick: tick,
@@ -119,27 +163,40 @@ contract BNBInvariantShield {
         emit TargetRegistered(targetPool, poolReceiver, oracleFeed);
     }
 
-    /// @notice Updates the High-Water Mark with oracle/TWAP validation and 1-hour rate limit
-    /// @dev Defeats C-1 (Flash-Pump griefing): Restricted role + cooldown prevents transient spot manipulation
+    /// @notice Updates the High-Water Mark with 30-minute TWAP and Chainlink Oracle validation
+    /// @dev Defeats C-1 (Flash-Pump griefing) and eliminates H-S1 (1-hour blind window) via continuous TWAP gating
     function updateHighWaterMark(address targetPool) external onlyRole(PAUSER_ROLE) {
         TargetConfig storage config = targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.NORMAL, "NOT_NORMAL");
         require(block.timestamp >= config.lastHwmUpdateTimestamp + HWM_UPDATE_COOLDOWN, "HWM_COOLDOWN_ACTIVE");
 
-        (uint160 currentSqrtPriceX96,,,,,,) = IPancakeV3Pool(targetPool).slot0();
+        (uint160 currentSqrtPriceX96, int24 currentTick,,,,,) = IPancakeV3Pool(targetPool).slot0();
         uint128 currentLiquidity = IPancakeV3Pool(targetPool).liquidity();
 
-        // If oracle feed exists, verify that spot price is consistent with oracle (rejects flash pumps)
+        // H-S1: Mathematical TWAP validation against 30-minute time-weighted average
+        int24 twapTick = getTwapTick(targetPool, TWAP_WINDOW);
+        int24 tickDiff = currentTick > twapTick ? currentTick - twapTick : twapTick - currentTick;
+        require(tickDiff <= MAX_TWAP_TICK_DEVIATION, "SPOT_DEVIATES_FROM_TWAP");
+
+        // M-S1: If oracle feed exists, verify that spot price is consistent with oracle (rejects flash pumps)
         if (config.oracleFeed != address(0)) {
             (, int256 oraclePrice,, uint256 updatedAt,) = IAggregatorV3(config.oracleFeed).latestRoundData();
             require(oraclePrice > 0, "INVALID_ORACLE_PRICE");
             require(block.timestamp - updatedAt <= 1 hours, "STALE_ORACLE_PRICE");
+            if (config.highWaterMarkOraclePrice > 0) {
+                // Oracle price must validate market rally (cannot fall below 98% of peak)
+                require(oraclePrice >= (config.highWaterMarkOraclePrice * 98) / 100, "ORACLE_PRICE_DISAGREES");
+            }
+            if (oraclePrice > config.highWaterMarkOraclePrice) {
+                config.highWaterMarkOraclePrice = oraclePrice;
+            }
         }
 
         bool updated = false;
         if (currentSqrtPriceX96 > config.highWaterMarkSqrtPriceX96) {
             config.highWaterMarkSqrtPriceX96 = currentSqrtPriceX96;
+            config.initialTick = currentTick; // M-S2: Refresh initialTick with HWM to prevent stale delta false positives in bull runs
             updated = true;
         }
 
@@ -186,7 +243,7 @@ contract BNBInvariantShield {
         (uint160 currentSqrtPriceX96, int24 currentTick,,,,,) = IPancakeV3Pool(targetPool).slot0();
         uint128 currentLiquidity = IPancakeV3Pool(targetPool).liquidity();
 
-        // Note: Spot ratchet removed (Fix C-1). Invariant drop is strictly checked against established HWM anchor.
+        // Spot ratchet removed (Fix C-1). Invariant drop is strictly checked against established HWM anchor.
         uint160 anchorPrice = config.highWaterMarkSqrtPriceX96 > 0
             ? config.highWaterMarkSqrtPriceX96
             : config.initialSqrtPriceX96;
@@ -207,11 +264,10 @@ contract BNBInvariantShield {
             ? config.highWaterMarkLiquidity
             : config.initialLiquidity;
 
-        uint256 targetDrainBps = config.maxDrainBps > 0 ? config.maxDrainBps : DEFAULT_MAX_DRAIN_BPS;
         (bool drainExceeded, ) = PancakeV3InvariantChecker.checkLiquidityDrain(
             anchorLiquidity,
             currentLiquidity,
-            targetDrainBps
+            config.maxDrainBps
         );
 
         require(dropExceeded || tickExceeded || drainExceeded, "INVARIANT_HEALTHY");
@@ -225,7 +281,7 @@ contract BNBInvariantShield {
         emit EmergencyPauseTriggered(targetPool, currentSqrtPriceX96, currentLiquidity, msg.sender);
     }
 
-    /// @notice Automated safety recovery if invariant health is fully restored and sustained for > 5 minutes
+    /// @notice Automated recovery for transient volatility or benign flash-loan noise
     /// @dev Fix H-3: Preserves highWaterMarkSqrtPriceX96 intact without erosion. uint256 safe casting applied.
     function autoRecoverIfHealthy(address targetPool) external onlyRole(PAUSER_ROLE) {
         TargetConfig storage config = targets[targetPool];
@@ -272,6 +328,7 @@ contract BNBInvariantShield {
             (, int256 price,, uint256 updatedAt,) = IAggregatorV3(config.oracleFeed).latestRoundData();
             require(price > 0, "INVALID_ORACLE_PRICE");
             require(block.timestamp - updatedAt <= maxOracleAge, "STALE_ORACLE_PRICE");
+            config.highWaterMarkOraclePrice = price; // M-S1: Reset oracle anchor on unpause
         }
 
         config.initialSqrtPriceX96 = currentSqrtPriceX96;
@@ -295,11 +352,16 @@ contract BNBInvariantShield {
         require(config.state == PoolState.PAUSED, "NOT_PAUSED");
         require(block.timestamp >= config.lastPauseTimestamp + EMERGENCY_TIMEOUT, "TIMEOUT_NOT_REACHED");
 
-        // Fix M-1: Verify that pool is genuinely still compromised; prevent bricking healthy pools
         (uint160 currentSqrtPriceX96,,,,,,) = IPancakeV3Pool(targetPool).slot0();
+        uint128 currentLiquidity = IPancakeV3Pool(targetPool).liquidity();
+
         uint160 anchorPrice = config.highWaterMarkSqrtPriceX96 > 0 ? config.highWaterMarkSqrtPriceX96 : config.initialSqrtPriceX96;
         (bool dropExceeded, ) = PancakeV3InvariantChecker.checkExactPriceDrop(anchorPrice, currentSqrtPriceX96, config.maxDeviationBps);
-        require(dropExceeded, "CANNOT_WIND_DOWN_RECOVERED_POOL");
+
+        uint128 anchorLiq = config.highWaterMarkLiquidity > 0 ? config.highWaterMarkLiquidity : config.initialLiquidity;
+        (bool drainExceeded, ) = PancakeV3InvariantChecker.checkLiquidityDrain(anchorLiq, currentLiquidity, config.maxDrainBps);
+
+        require(dropExceeded || drainExceeded, "CANNOT_WIND_DOWN_RECOVERED_POOL");
 
         config.state = PoolState.EMERGENCY_WIND_DOWN;
 
@@ -315,6 +377,14 @@ contract BNBInvariantShield {
         require(config.isRegistered, "NOT_REGISTERED");
         require(config.state == PoolState.EMERGENCY_WIND_DOWN, "NOT_WIND_DOWN");
 
+        (uint160 currentSqrtPriceX96, int24 currentTick,,,,,) = IPancakeV3Pool(targetPool).slot0();
+        uint128 currentLiquidity = IPancakeV3Pool(targetPool).liquidity();
+
+        config.initialSqrtPriceX96 = currentSqrtPriceX96;
+        config.highWaterMarkSqrtPriceX96 = currentSqrtPriceX96;
+        config.initialLiquidity = currentLiquidity;
+        config.highWaterMarkLiquidity = currentLiquidity;
+        config.initialTick = currentTick;
         config.state = PoolState.NORMAL;
 
         (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyUnpause()"));

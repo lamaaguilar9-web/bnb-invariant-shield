@@ -48,6 +48,14 @@ interface IPancakeV3Pool {
         uint128 amount1Requested
     ) external returns (uint128 amount0, uint128 amount1);
 
+    function mint(
+        address recipient,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 amount,
+        bytes calldata data
+    ) external returns (uint256 amount0, uint256 amount1);
+
     function observe(uint32[] calldata secondsAgos)
         external
         view
@@ -55,4 +63,13 @@ interface IPancakeV3Pool {
             int56[] memory tickCumulatives,
             uint160[] memory secondsPerLiquidityCumulativeX128s
         );
+}
+
+/// @title IPancakeV3MintCallback - Callback for minting concentrated liquidity on PancakeSwap v3
+interface IPancakeV3MintCallback {
+    function pancakeV3MintCallback(
+        uint256 amount0Owed,
+        uint256 amount1Owed,
+        bytes calldata data
+    ) external;
 }

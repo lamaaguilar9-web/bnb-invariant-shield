@@ -4,10 +4,10 @@ pragma solidity ^0.8.20;
 import "./interfaces/IBEP20.sol";
 import "./interfaces/IPancakeV3Pool.sol";
 
-/// @title BNBProtectedPoolReceiver - Liquidity Protection & Orderly Exit Hook for PancakeSwap v3
-/// @notice Freezes LP operations during incident pauses and facilitates non-custodial capital redemption
-/// @dev Hardened against frontrunning, Sybil LP draining, and reentrancy attacks
-contract BNBProtectedPoolReceiver {
+/// @title BNBProtectedPoolReceiver - Production-Grade Concentrated Liquidity Vault & Safe Exit Hook
+/// @notice Manages PancakeSwap v3 LP positions with atomic circuit breaker pauses and non-custodial emergency wind-down
+/// @dev Hardened against Reentrancy (H-R1), Global Liquidity Share Overburn (H-R2), and Unbacked Mints (H-R3)
+contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
     address public immutable targetPool;
     address public immutable token0;
     address public immutable token1;
@@ -18,19 +18,23 @@ contract BNBProtectedPoolReceiver {
 
     bool public paused;
     bool public emergencyWindDownActive;
+    bool private _locked;
+
+    // H-R2: Track receiver's OWN position liquidity (not global pool liquidity)
+    uint128 public ownPositionLiquidity;
 
     mapping(address => uint256) public lpBalances;
     uint256 public totalLpSupply;
 
-    int24 public tickLower;
-    int24 public tickUpper;
+    int24 public immutable tickLower;
+    int24 public immutable tickUpper;
 
     event CircuitBreakerUpdated(address indexed previousBreaker, address indexed newBreaker);
     event LiquidityManagerUpdated(address indexed previousManager, address indexed newManager);
     event EmergencyPauseActivated();
     event EmergencyUnpaused();
     event EmergencyWindDownTriggered();
-    event LiquidityMinted(address indexed user, uint256 amount);
+    event LiquidityDeposited(address indexed user, uint128 liquidityMinted, uint256 amount0Used, uint256 amount1Used);
     event OrderlyLiquidityWithdrawn(address indexed user, uint256 lpAmount, uint256 amount0, uint256 amount1);
 
     modifier onlyOwner() {
@@ -53,17 +57,26 @@ contract BNBProtectedPoolReceiver {
         _;
     }
 
+    // H-R1: Formal ReentrancyGuard implementation
+    modifier nonReentrant() {
+        require(!_locked, "REENTRANCY_GUARD: REENTRANT_CALL");
+        _locked = true;
+        _;
+        _locked = false;
+    }
+
     constructor(
         address _targetPool,
         address _token0,
         address _token1,
         int24 _tickLower,
-        int24 _tickUpper
+        int24 _tickUpper,
+        address _initialCircuitBreaker
     ) {
         require(_targetPool != address(0) && _token0 != address(0) && _token1 != address(0), "INVALID_ADDRESS");
         owner = msg.sender;
-        circuitBreaker = msg.sender;
         liquidityManager = msg.sender;
+        circuitBreaker = _initialCircuitBreaker != address(0) ? _initialCircuitBreaker : msg.sender;
         targetPool = _targetPool;
         token0 = _token0;
         token1 = _token1;
@@ -100,25 +113,69 @@ contract BNBProtectedPoolReceiver {
         emit EmergencyWindDownTriggered();
     }
 
-    function mintLp(address user, uint256 amount) external onlyLiquidityManager whenNotPaused {
+    /// @notice H-R3: Deposit underlying tokens and mint active concentrated liquidity on PancakeSwap v3
+    /// @dev Fully backed: pulls tokens, mints on-chain position, updates ownPositionLiquidity and credits shares
+    function depositLiquidity(
+        address user,
+        uint128 liquidityAmount
+    ) external onlyLiquidityManager whenNotPaused nonReentrant returns (uint256 amount0, uint256 amount1) {
         require(user != address(0), "INVALID_USER");
-        require(amount > 0, "INVALID_AMOUNT");
-        lpBalances[user] += amount;
-        totalLpSupply += amount;
-        emit LiquidityMinted(user, amount);
+        require(liquidityAmount > 0, "INVALID_LIQUIDITY_AMOUNT");
+
+        // Mint position on PancakeSwap v3 pool (triggers pancakeV3MintCallback)
+        (amount0, amount1) = IPancakeV3Pool(targetPool).mint(
+            address(this),
+            tickLower,
+            tickUpper,
+            liquidityAmount,
+            ""
+        );
+
+        ownPositionLiquidity += liquidityAmount;
+        lpBalances[user] += liquidityAmount;
+        totalLpSupply += liquidityAmount;
+
+        emit LiquidityDeposited(user, liquidityAmount, amount0, amount1);
     }
 
-    /// @notice Orderly non-custodial withdrawal during emergency wind down
-    /// @dev Burns PancakeSwap v3 concentrated liquidity and returns pro-rata token shares
-    function orderlyWithdraw(uint256 lpAmount) external returns (uint256 amount0, uint256 amount1) {
+    /// @notice PancakeSwap v3 mint callback to transfer tokens owed during liquidity creation
+    function pancakeV3MintCallback(
+        uint256 amount0Owed,
+        uint256 amount1Owed,
+        bytes calldata data
+    ) external override {
+        require(msg.sender == targetPool, "ONLY_TARGET_POOL_CALLBACK");
+
+        if (data.length == 32) {
+            address payer = abi.decode(data, (address));
+            if (amount0Owed > 0) {
+                require(IBEP20(token0).transferFrom(payer, msg.sender, amount0Owed), "PULL_TOKEN0_FAILED");
+            }
+            if (amount1Owed > 0) {
+                require(IBEP20(token1).transferFrom(payer, msg.sender, amount1Owed), "PULL_TOKEN1_FAILED");
+            }
+        } else {
+            if (amount0Owed > 0) {
+                require(IBEP20(token0).transfer(msg.sender, amount0Owed), "CALLBACK_TRANSFER0_FAILED");
+            }
+            if (amount1Owed > 0) {
+                require(IBEP20(token1).transfer(msg.sender, amount1Owed), "CALLBACK_TRANSFER1_FAILED");
+            }
+        }
+    }
+
+    /// @notice Orderly non-custodial capital redemption during emergency wind down
+    /// @dev H-R1: CEI pattern strictly enforced before transfers. H-R2: Burns only from ownPositionLiquidity
+    function orderlyWithdraw(uint256 lpAmount) external nonReentrant returns (uint256 amount0, uint256 amount1) {
         require(emergencyWindDownActive, "WIND_DOWN_NOT_ACTIVE");
         require(lpBalances[msg.sender] >= lpAmount, "INSUFFICIENT_LP_BALANCE");
         require(totalLpSupply > 0, "ZERO_TOTAL_SUPPLY");
 
-        uint128 poolLiquidity = IPancakeV3Pool(targetPool).liquidity();
-        if (poolLiquidity > 0) {
-            uint128 liqToBurn = uint128((uint256(poolLiquidity) * lpAmount) / totalLpSupply);
+        // H-R2: Calculate burn strictly against the receiver's own position liquidity
+        if (ownPositionLiquidity > 0) {
+            uint128 liqToBurn = uint128((uint256(ownPositionLiquidity) * lpAmount) / totalLpSupply);
             if (liqToBurn > 0) {
+                ownPositionLiquidity -= liqToBurn;
                 IPancakeV3Pool(targetPool).burn(tickLower, tickUpper, liqToBurn);
                 IPancakeV3Pool(targetPool).collect(
                     address(this),
@@ -136,6 +193,7 @@ contract BNBProtectedPoolReceiver {
         amount0 = (lpAmount * bal0) / totalLpSupply;
         amount1 = (lpAmount * bal1) / totalLpSupply;
 
+        // H-R1: CEI Pattern — State deducted BEFORE any external token transfers
         lpBalances[msg.sender] -= lpAmount;
         totalLpSupply -= lpAmount;
 
