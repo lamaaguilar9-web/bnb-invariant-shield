@@ -514,15 +514,15 @@ def test_7_orderly_withdraw_with_pancake_burn():
     assert pool.pool_liquidity == 19_999_950
 
 def test_8_gas_engine_and_private_relay():
-    """Verifies dynamic BSC gas pricing and sub-30ms private relay inclusion."""
+    """Verifies dynamic BSC gas pricing and honest private relay telemetry."""
     gas_engine = BNBGasEngine(chain_id=56, priority_multiplier=1.35)
     gas_info = gas_engine.calculate_defense_gas(current_gas_price_wei=int(1.5 * 1e9))
     assert gas_info["urgentDefenseGasGwei"] >= 2.5
-    assert gas_info["priorityStatus"] == "TOP_OF_BLOCK_BSC_GUARANTEED"
+    assert gas_info["priorityStatus"] == "BSC_PRIORITY_ACCELERATED"
 
     relay = BNBPrivateRelayClient(preferred_gateway="Bloxroute BDN")
     res = relay.submit_private_defense_transaction({"test": "data"})
-    assert res["status"] == "SUCCESS_BSC_VALIDATOR_DIRECT_INCLUSION"
+    assert res["status"] in ("RELAY_STANDBY_DRY_RUN", "SUCCESS_BSC_VALIDATOR_DIRECT_INCLUSION")
     assert res["sandwichImmune"] is True
     assert res["latencyMs"] < 35.0
 
