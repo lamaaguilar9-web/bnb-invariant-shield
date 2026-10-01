@@ -42,6 +42,7 @@ contract BNBInvariantShield {
 
     event TargetRegistered(address indexed targetPool, address indexed poolReceiver, address oracleFeed);
     event HighWaterMarkUpdated(address indexed targetPool, uint160 newHighWaterMarkSqrtPriceX96);
+    event RiskParametersUpdated(address indexed targetPool, uint256 maxDeviationBps, int24 maxTickDelta);
     event EmergencyPauseTriggered(address indexed targetPool, uint160 currentSqrtPriceX96, uint128 currentLiquidity, address indexed triggeredBy);
     event TargetUnpausedByMultisig(address indexed targetPool, address indexed unpausedBy);
     event EmergencyWindDownActivated(address indexed targetPool, uint256 timestamp);
@@ -90,6 +91,7 @@ contract BNBInvariantShield {
         (uint160 sqrtPriceX96, int24 tick,,,,,) = IPancakeV3Pool(targetPool).slot0();
         require(sqrtPriceX96 > 0, "INVALID_SQRT_PRICE");
         uint128 poolLiquidity = IPancakeV3Pool(targetPool).liquidity();
+        require(poolLiquidity > 0, "POOL_HAS_NO_LIQUIDITY");
 
         targets[targetPool] = TargetConfig({
             isRegistered: true,
@@ -121,6 +123,23 @@ contract BNBInvariantShield {
             config.highWaterMarkSqrtPriceX96 = currentSqrtPriceX96;
             emit HighWaterMarkUpdated(targetPool, currentSqrtPriceX96);
         }
+    }
+
+    /// @notice Configures custom invariant risk parameters for a protected pool
+    /// @dev Validates bounds: maxDeviationBps in [2, 10000], maxTickDelta > 0 (GLM-5.3 audit checklist point 7)
+    function updateTargetRiskParameters(
+        address targetPool,
+        uint256 maxDeviationBps,
+        int24 maxTickDelta
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        TargetConfig storage config = targets[targetPool];
+        require(config.isRegistered, "NOT_REGISTERED");
+        require(maxDeviationBps >= 2 && maxDeviationBps <= 10000, "INVALID_BPS_RANGE");
+        require(maxTickDelta > 0, "INVALID_TICK_DELTA");
+
+        config.maxDeviationBps = maxDeviationBps;
+        config.maxTickDelta = maxTickDelta;
+        emit RiskParametersUpdated(targetPool, maxDeviationBps, maxTickDelta);
     }
 
     /// @notice Triggers emergency circuit breaker pause if and only if on-chain invariant breach is mathematically verified
