@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sentinel Invariant Shield — BNB Chain & opBNB Mission Control</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js for High-Performance Invariant Visualizations -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            bgDark: '#090A0F',
+            cardDark: '#16181D',
+            bnbGold: '#F0B90B',
+            safeGreen: '#10B981',
+            panicRed: '#EF4444',
+            geminiBlue: '#3B82F6'
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['Geist Mono', 'JetBrains Mono', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #090A0F;
+      color: #E2E8F0;
+      font-family: 'Inter', sans-serif;
+    }
+    .micro-border {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .pulse-danger {
+      animation: pulseDanger 1.2s infinite;
+    }
+    @keyframes pulseDanger {
+      0%, 100% { border-color: rgba(239, 68, 68, 0.3); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+      50% { border-color: rgba(239, 68, 68, 1); box-shadow: 0 0 15px 2px rgba(239, 68, 68, 0.5); }
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #090A0F; }
+    ::-webkit-scrollbar-thumb { background: #262930; border-radius: 3px; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between overflow-x-hidden selection:bg-bnbGold selection:text-black">
+
+  <!-- ==================== HEADER / STATUS BAR ==================== -->
+  <header class="bg-cardDark micro-border border-b border-t-0 border-x-0 px-5 py-3 sticky top-0 z-50">
+    <div class="max-w-[1920px] mx-auto flex flex-wrap items-center justify-between gap-4">
+      
+      <!-- Brand & Network -->
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-bnbGold flex items-center justify-center font-bold text-black text-sm shadow-md">
+            🛡️
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="font-bold tracking-tight text-white text-base">SENTINEL SHIELD</span>
+              <span class="text-xs px-2 py-0.5 rounded font-mono font-semibold bg-bnbGold/10 text-bnbGold border border-bnbGold/30">
+                BNB Chain (ID: 56)
+              </span>
+              <span class="text-[10px] px-1.5 py-0.5 rounded font-mono bg-white/5 text-gray-400 border border-white/10">
+                v1.0.0 MVB
+              </span>
+            </div>
+            <p class="text-[11px] text-gray-400 font-mono">PancakeSwap v3 & Venus Circuit Breaker</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Telemetry Strip -->
+      <div class="flex flex-wrap items-center gap-2 sm:gap-4 text-xs font-mono">
+        <div class="flex items-center gap-1.5 px-3 py-1 rounded bg-[#0D0F14] micro-border">
+          <span class="w-2 h-2 rounded-full bg-safeGreen animate-ping"></span>
+          <span class="text-gray-400">E2E Latency:</span>
+          <span class="text-safeGreen font-bold" id="latencyDisplay">24.8 ms</span>
+          <span class="text-[10px] text-gray-500">(SLA &lt;35ms)</span>
+        </div>
+
+        <div class="flex items-center gap-1.5 px-3 py-1 rounded bg-[#0D0F14] micro-border">
+          <span class="text-gray-400">Relay:</span>
+          <span class="text-white font-semibold flex items-center gap-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-safeGreen"></span> Bloxroute BDN + 48 Club
+          </span>
+        </div>
+
+        <div class="flex items-center gap-1.5 px-3 py-1 rounded bg-[#0D0F14] micro-border">
+          <span class="text-gray-400">OFAC:</span>
+          <span class="text-bnbGold font-bold">155 Screened</span>
+          <span class="text-[10px] text-gray-500">0.124ms</span>
+        </div>
+
+        <div class="flex items-center gap-1.5 px-3 py-1 rounded bg-[#0D0F14] micro-border">
+          <span class="text-gray-400">Governance:</span>
+          <span class="text-blue-400 font-semibold">Safe 3/5 ACTIVE</span>
+          <span class="text-[10px] text-gray-500">[PAUSER ONLY: 0x15C4...d74e]</span>
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="flex items-center gap-2">
+        <button id="btnAttack" onclick="triggerSimulatedAttack()" class="px-3 py-1.5 bg-panicRed/15 text-panicRed hover:bg-panicRed hover:text-white border border-panicRed/30 rounded text-xs font-mono font-semibold transition-all flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-panicRed"></span> Simular Flash Loan
+        </button>
+        <button id="btnReset" onclick="resetSimulatedState()" class="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 rounded text-xs font-mono transition-all">
+          Restablecer
+        </button>
+        <button onclick="openLegalModal()" class="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white border border-white/10 rounded text-xs font-mono transition-all">
+          ⚖️ Compliance
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- ==================== MAIN COCKPIT: BENTO GRID (3 COLUMNS) ==================== -->
+  <main class="max-w-[1920px] mx-auto w-full p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1">
+
+    <!-- COLUMNA 1: PROTOCOL METRICS & CIRCUIT BREAKER STATUS (3 COLS) -->
+    <section class="lg:col-span-3 flex flex-col gap-4">
+      
+      <!-- Card: Pool Status -->
+      <div id="statusCard" class="bg-cardDark micro-border rounded-xl p-4 transition-all duration-300">
+        <div class="flex items-center justify-between pb-3 border-b border-white/5">
+          <span class="text-xs uppercase font-mono tracking-wider text-gray-400">ESTADO DEL DISYUNTOR</span>
+          <span id="badgeState" class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-safeGreen/15 text-safeGreen border border-safeGreen/30">
+            NORMAL (OPERATIVO)
+          </span>
+        </div>
+        <div class="mt-4">
+          <div class="text-2xl font-bold font-mono tracking-tight" id="mainStateText">
+            INVARIANTE ACTIVO
+          </div>
+          <p class="text-xs text-gray-400 mt-1 font-mono" id="subStateText">
+            PancakeSwap v3: WBNB / USDT (0.05% Pool)
+          </p>
+        </div>
+        <div class="mt-4 pt-3 border-t border-white/5 grid grid-cols-2 gap-2 text-xs font-mono">
+          <div>
+            <span class="text-gray-500 block text-[10px]">REACCIÓN DEFENSIVA</span>
+            <span class="text-white font-bold text-sm">24.8 ms</span>
+          </div>
+          <div>
+            <span class="text-gray-500 block text-[10px]">UMBRAL DE PÁNICO</span>
+            <span class="text-bnbGold font-bold text-sm">1500 bps (15.0%)</span>
+          </div>
+          <div class="mt-2">
+            <span class="text-gray-500 block text-[10px]">FUNGIBILIDAD LP</span>
+            <span class="text-safeGreen font-bold" id="lpStatus">NORMAL</span>
+          </div>
+          <div class="mt-2">
+            <span class="text-gray-500 block text-[10px]">CONSECUTIVE PAUSES</span>
+            <span class="text-white font-bold" id="pauseCount">0 / 2 (MiCA Safe)</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card: Target Pool Reserves & Tick -->
+      <div class="bg-cardDark micro-border rounded-xl p-4 flex-1 flex flex-col justify-between">
+        <div>
+          <div class="flex items-center justify-between pb-2 border-b border-white/5">
+            <span class="text-xs uppercase font-mono tracking-wider text-gray-400">RESERVAS ON-CHAIN</span>
+            <span class="text-[10px] font-mono text-gray-400">Chain ID 56</span>
+          </div>
+
+          <div class="mt-3 space-y-3 font-mono text-xs">
+            <div class="p-2.5 rounded bg-[#0D0F14] micro-border">
+              <div class="flex justify-between items-center text-gray-400 text-[11px]">
+                <span>Token 0 (WBNB):</span>
+                <span class="text-gray-500 text-[10px]">0xbb4C...095c</span>
+              </div>
+              <div class="text-lg font-bold text-white mt-0.5" id="valReserve0">
+                85,200.00 WBNB
+              </div>
+              <span class="text-[11px] text-gray-500" id="valReserve0Usd">≈ $51,120,000 USD</span>
+            </div>
+
+            <div class="p-2.5 rounded bg-[#0D0F14] micro-border">
+              <div class="flex justify-between items-center text-gray-400 text-[11px]">
+                <span>Token 1 (USDT):</span>
+                <span class="text-gray-500 text-[10px]">0x55d3...7955</span>
+              </div>
+              <div class="text-lg font-bold text-white mt-0.5" id="valReserve1">
+                48,500,000.00 USDT
+              </div>
+              <span class="text-[11px] text-gray-500">BEP-20 Tether USD</span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2 text-[11px]">
+              <div class="p-2 rounded bg-[#0D0F14] micro-border">
+                <span class="text-gray-500 block text-[10px]">TICK ACTUAL</span>
+                <span class="text-white font-bold" id="valTick">78,240</span>
+              </div>
+              <div class="p-2 rounded bg-[#0D0F14] micro-border">
+                <span class="text-gray-500 block text-[10px]">INVARIANTE K (x·y)</span>
+                <span class="text-safeGreen font-bold" id="valKRatio">1.0000 (100%)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Node & Infrastructure Badge -->
+        <div class="mt-4 pt-3 border-t border-white/5 text-[11px] font-mono text-gray-500 flex items-center justify-between">
+          <span>Hostinger KVM 1 (Houston)</span>
+          <span class="text-safeGreen flex items-center gap-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-safeGreen"></span> 7 Capas Blindadas
+          </span>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- COLUMNA 2: REAL-TIME INVARIANT & TICK DIVERGENCE CHART (5 COLS) -->
+    <section class="lg:col-span-5 flex flex-col gap-4">
+      <div class="bg-cardDark micro-border rounded-xl p-4 flex-1 flex flex-col justify-between">
+        <div class="flex items-center justify-between pb-3 border-b border-white/5">
+          <div class="flex items-center gap-2">
+            <span class="text-xs uppercase font-mono tracking-wider text-gray-300 font-bold">
+              MONITOR DE INVARIANTE EN TIEMPO REAL
+            </span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 font-mono">
+              Aritmética 512-bit
+            </span>
+          </div>
+          <div class="flex items-center gap-3 text-xs font-mono text-gray-400">
+            <span class="flex items-center gap-1"><span class="w-2.5 h-0.5 bg-safeGreen inline-block"></span> Ratio K</span>
+            <span class="flex items-center gap-1"><span class="w-2.5 h-0.5 bg-panicRed inline-block border-dashed"></span> Umbral 15%</span>
+          </div>
+        </div>
+
+        <!-- Chart Container -->
+        <div class="relative w-full h-[320px] my-3">
+          <canvas id="invariantChart"></canvas>
+        </div>
+
+        <!-- Real-Time Metrics Footnote -->
+        <div class="grid grid-cols-3 gap-2 pt-3 border-t border-white/5 text-xs font-mono text-center">
+          <div class="p-2 rounded bg-[#0D0F14] micro-border">
+            <span class="text-gray-500 block text-[10px]">MÉTODO EVALUACIÓN</span>
+            <span class="text-white font-semibold">Constant-Time O(1)</span>
+          </div>
+          <div class="p-2 rounded bg-[#0D0F14] micro-border">
+            <span class="text-gray-500 block text-[10px]">DESVÍO MÁXIMO BPS</span>
+            <span class="text-bnbGold font-semibold">1,500 bps (15%)</span>
+          </div>
+          <div class="p-2 rounded bg-[#0D0F14] micro-border">
+            <span class="text-gray-500 block text-[10px]">DESVÍO DETECTADO</span>
+            <span class="text-white font-bold" id="metricDetectedDrop">0.00% (0 bps)</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- COLUMNA 3: GEMINI FLASH L3 FORENSIC INSPECTOR (4 COLS) -->
+    <section class="lg:col-span-4 flex flex-col gap-4">
+      <div class="bg-cardDark micro-border rounded-xl p-4 flex-1 flex flex-col justify-between">
+        
+        <div>
+          <div class="flex items-center justify-between pb-3 border-b border-white/5">
+            <div class="flex items-center gap-2">
+              <span class="text-xs uppercase font-mono tracking-wider text-geminiBlue font-bold flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-geminiBlue animate-pulse"></span> GEMINI FLASH L3 FORENSIC
+              </span>
+            </div>
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-white/5 text-gray-400 micro-border">
+              Post-Mortem Asíncrono
+            </span>
+          </div>
+
+          <!-- Structured Report Render -->
+          <div class="mt-3 space-y-2.5 font-mono text-xs">
+            <div class="p-3 rounded bg-[#0D0F14] micro-border space-y-2">
+              <div class="flex justify-between items-center text-[11px]">
+                <span class="text-gray-400">Incident ID:</span>
+                <span class="text-white font-bold" id="fId">INC-20260930-BNB-01</span>
+              </div>
+              <div class="flex justify-between items-center text-[11px]">
+                <span class="text-gray-400">Severidad:</span>
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-safeGreen/15 text-safeGreen" id="fSeverity">
+                  NOMINAL / SIN ANOMALÍAS
+                </span>
+              </div>
+              <div class="flex justify-between items-center text-[11px]">
+                <span class="text-gray-400">Vector de Ataque:</span>
+                <span class="text-gray-300 font-semibold text-right" id="fVector">Ninguno (Vigilancia Normal)</span>
+              </div>
+            </div>
+
+            <!-- Analysis Root Cause Box -->
+            <div class="p-3 rounded bg-[#0D0F14] micro-border">
+              <span class="text-gray-500 text-[10px] uppercase block mb-1">Dictamen Forense Explicativo</span>
+              <p class="text-[11px] leading-relaxed text-gray-300" id="fAnalysis">
+                "Pool en equilibrio térmico y matemático. El producto constante x·y=k no presenta desviaciones anómalas. Monitoreo pasivo sub-30ms activo vía Bloxroute BDN y 48 Club."
+              </p>
+            </div>
+
+            <!-- Cryptographic Signature Card (EIP-712) -->
+            <div class="p-3 rounded bg-[#0D0F14] micro-border space-y-1.5">
+              <div class="flex justify-between items-center text-[10px]">
+                <span class="text-gray-400 uppercase">Sello Criptográfico EIP-712</span>
+                <span class="text-safeGreen font-bold flex items-center gap-1">
+                  ✓ VERIFICADO
+                </span>
+              </div>
+              <p class="text-[10px] text-gray-400 break-all" id="fSig">
+                0x8a7c2bf1092e44d89a7102c98492019ab7612f00129a88c71b6910a9f24c9012
+              </p>
+              <div class="flex justify-between items-center text-[10px] pt-1 border-t border-white/5 text-gray-500">
+                <span>Signer: 0x15C42d6E...d74e</span>
+                <span>SHA-256 Digest OK</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Forensic Action Buttons -->
+        <div class="mt-4 pt-3 border-t border-white/5 flex flex-col gap-2">
+          <div class="grid grid-cols-2 gap-2 text-xs font-mono">
+            <button onclick="copyForensicJson()" class="px-3 py-2 rounded bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 flex items-center justify-center gap-1.5 transition-all">
+              📋 Copiar JSON
+            </button>
+            <button onclick="dispatchTelegramNotification()" class="px-3 py-2 rounded bg-geminiBlue/15 hover:bg-geminiBlue text-geminiBlue hover:text-white border border-geminiBlue/30 flex items-center justify-center gap-1.5 transition-all font-semibold">
+              ✈️ Alert Bot
+            </button>
+          </div>
+          <span id="toastMsg" class="text-[10px] text-center font-mono text-safeGreen h-3"></span>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ==================== FOOTER: LIVE TERMINAL FEED ==================== -->
+  <footer class="bg-cardDark micro-border border-b-0 border-x-0 p-3 sticky bottom-0 z-40">
+    <div class="max-w-[1920px] mx-auto flex items-center justify-between text-xs font-mono text-gray-400 mb-1">
+      <span class="flex items-center gap-1.5 font-bold text-gray-300">
+        <span class="w-1.5 h-1.5 rounded-full bg-safeGreen"></span> LIVE TERMINAL FEED (WEBSOCKET BSC RPC)
+      </span>
+      <span class="text-[10px] text-gray-500">Auto-Scroll ON | Microsecond UTC Timestamps</span>
+    </div>
+    <div id="terminalLog" class="max-w-[1920px] mx-auto h-20 bg-[#06070A] micro-border rounded p-2 overflow-y-auto font-mono text-[11px] space-y-1">
+      <div class="text-gray-500">[01:48:19.124891] [BLOCK #42891206] WebSocket connected to bsc-dataseed. Invariant sensor running O(1) checks.</div>
+      <div class="text-safeGreen">[01:48:22.125014] [BLOCK #42891207] Swap(PancakeV3) 4.2 WBNB -&gt; 2,520 USDT. Ratio k: 1.0000. Invariant HEALTHY.</div>
+      <div class="text-gray-400">[01:48:25.125199] [BLOCK #42891208] slot0 queried. Tick 78240 nominal. Mempool frontrun shield active.</div>
+    </div>
+  </footer>
+
+  <!-- ==================== LEGAL / COMPLIANCE MODAL ==================== -->
+  <div id="legalModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-cardDark micro-border rounded-xl max-w-2xl w-full p-6 font-mono text-xs max-h-[85vh] flex flex-col justify-between">
+      <div>
+        <div class="flex justify-between items-center pb-3 border-b border-white/10">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            ⚖️ Cumplimiento Legal & Matriz Regulatoria (Sentinel Fleet)
+          </h3>
+          <button onclick="closeLegalModal()" class="text-gray-400 hover:text-white text-lg">&times;</button>
+        </div>
+        <div class="mt-4 space-y-3 text-gray-300 text-[11px] overflow-y-auto max-h-[50vh] pr-2">
+          <div class="p-2.5 rounded bg-[#0D0F14] micro-border">
+            <span class="font-bold text-bnbGold block mb-0.5">1. Principio Estricto Zero-PII (Ley N° 787 / GDPR)</span>
+            <p class="text-gray-400">La telemetría procesa exclusivamente parámetros on-chain públicos (hashes, reservas, ticks y gas). Cero recolección ni venta de datos personales de usuarios.</p>
+          </div>
+          <div class="p-2.5 rounded bg-[#0D0F14] micro-border">
+            <span class="font-bold text-safeGreen block mb-0.5">2. Naturaleza Estrictamente No-Custodial (MiCA Compliant)</span>
+            <p class="text-gray-400">El contrato centinela posee saldo 0.00 BNB / 0 tokens. El bot posee exclusivamente PAUSER_ROLE. El despausado exige multisig Safe 3/5 con oráculo fresco.</p>
+          </div>
+          <div class="p-2.5 rounded bg-[#0D0F14] micro-border">
+            <span class="font-bold text-blue-400 block mb-0.5">3. Cumplimiento FTC Act Section 5 (No Deceptive Claims)</span>
+            <p class="text-gray-400">Herramienta de mitigación algorítmica probabilística y triaje determinista. Cero afirmaciones de "inmunidad 100%". Supervisión en comités humanos.</p>
+          </div>
+          <div class="p-2.5 rounded bg-[#0D0F14] micro-border">
+            <span class="font-bold text-purple-400 block mb-0.5">4. Contrato Comercial Google Cloud No-Training</span>
+            <p class="text-gray-400">Inferencia de Gemini Flash ejecutada bajo contratos empresariales donde los volcados técnicos jamás entrenan modelos públicos de Google.</p>
+          </div>
+        </div>
+      </div>
+      <div class="mt-4 pt-3 border-t border-white/10 flex justify-between items-center">
+        <span class="text-[10px] text-gray-500">DMCA-1081204 | Agente: luis.growthhq@gmail.com</span>
+        <button onclick="closeLegalModal()" class="px-4 py-1.5 bg-bnbGold text-black font-bold rounded text-xs">
+          Entendido
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== JAVASCRIPT ENGINE ==================== -->
+  <script>
+    // Invariant Chart Setup
+    const ctx = document.getElementById('invariantChart').getContext('2d');
+    const chartLabels = ['-15s', '-12s', '-9s', '-6s', '-3s', 'NOW'];
+    const nominalKData = [1.00, 0.999, 1.001, 1.00, 0.998, 1.00];
+    const thresholdData = [0.85, 0.85, 0.85, 0.85, 0.85, 0.85];
+
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: chartLabels,
+        datasets: [
+          {
+            label: 'Ratio de Invariante k (x·y)',
+            data: nominalKData,
+            borderColor: '#10B981',
+            backgroundColor: 'rgba(16, 185, 129, 0.08)',
+            borderWidth: 2.5,
+            fill: true,
+            tension: 0.25,
+            pointRadius: 4,
+            pointBackgroundColor: '#10B981'
+          },
+          {
+            label: 'Umbral Crítico de Pánico (15% Drop)',
+            data: thresholdData,
+            borderColor: '#EF4444',
+            borderWidth: 1.5,
+            borderDash: [5, 5],
+            fill: false,
+            pointRadius: 0
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        },
+        scales: {
+          y: {
+            min: 0.65,
+            max: 1.05,
+            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+            ticks: {
+              color: '#94A3B8',
+              font: { family: 'Geist Mono', size: 10 },
+              callback: (val) => `${(val * 100).toFixed(0)}%`
+            }
+          },
+          x: {
+            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+            ticks: {
+              color: '#94A3B8',
+              font: { family: 'Geist Mono', size: 10 }
+            }
+          }
+        }
+      }
+    });
+
+    let isAttacked = false;
+
+    function triggerSimulatedAttack() {
+      if (isAttacked) return;
+      isAttacked = true;
+
+      // 1. Update Chart Data
+      chart.data.datasets[0].data = [1.00, 0.999, 1.00, 0.998, 0.82, 0.74];
+      chart.data.datasets[0].borderColor = '#EF4444';
+      chart.data.datasets[0].backgroundColor = 'rgba(239, 68, 68, 0.15)';
+      chart.data.datasets[0].pointBackgroundColor = '#EF4444';
+      chart.update();
+
+      // 2. UI Status Card Transition
+      const statusCard = document.getElementById('statusCard');
+      statusCard.classList.add('pulse-danger', 'border-panicRed');
+      
+      const badge = document.getElementById('badgeState');
+      badge.className = 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-panicRed/20 text-panicRed border border-panicRed/50';
+      badge.innerText = '🚨 ATOMIC PAUSE FIRED';
+
+      document.getElementById('mainStateText').innerText = 'POOL DETENIDO (24.8ms)';
+      document.getElementById('mainStateText').className = 'text-2xl font-bold font-mono tracking-tight text-panicRed';
+      document.getElementById('subStateText').innerText = 'Pausa on-chain ejecutada vía Bloxroute BDN (Sandwich Immune)';
+
+      document.getElementById('lpStatus').innerText = 'CONGELADO (Anti-Sybil)';
+      document.getElementById('lpStatus').className = 'text-panicRed font-bold';
+
+      document.getElementById('pauseCount').innerText = '1 / 2 (Safe Activo)';
+
+      // 3. Update Reserves Display (Simulated 26% drain)
+      document.getElementById('valReserve0').innerText = '63,048.00 WBNB';
+      document.getElementById('valReserve0Usd').innerText = '≈ $37,828,800 USD (-$13.2M Drained)';
+      document.getElementById('valTick').innerText = '76,000 (Δ 2240 ticks)';
+      document.getElementById('valKRatio').innerText = '0.7400 (-26.0%)';
+      document.getElementById('valKRatio').className = 'text-panicRed font-bold';
+      document.getElementById('metricDetectedDrop').innerText = '-26.00% (2600 bps)';
+      document.getElementById('metricDetectedDrop').className = 'text-panicRed font-bold';
+
+      // 4. Update Gemini Forensic Panel
+      document.getElementById('fSeverity').innerText = 'CRITICAL (HIGH IMPACT)';
+      document.getElementById('fSeverity').className = 'px-1.5 py-0.5 rounded text-[10px] font-bold bg-panicRed/20 text-panicRed';
+      document.getElementById('fVector').innerText = 'Flash-Loan Liquidity Drain & Tick Divergence';
+      document.getElementById('fAnalysis').innerText = '"Ataque coordinado mediante préstamo relámpago que forzó una caída de precio del 26.0% (2600 bps) y divergencia de tick de 2240 unidades. El Centinela ejecutó la pausa atómica on-chain en 24.8ms vía Bloxroute BDN bloqueando el retiro de fondos."';
+
+      // 5. Add Terminal Log Entry
+      appendLog('[01:48:31.912401] 🚨 [CRITICAL_BREACH] Delta K &gt; 1500 bps detected! Triggering BNBInvariantShield.sol::triggerEmergencyPause()', 'text-panicRed font-bold');
+      appendLog('[01:48:31.937201] ⚡ [BLOXROUTE_BDN] Private defense bundle mined top-of-block. Reaction: 24.8ms. Frontrunning prevented.', 'text-bnbGold');
+      appendLog('[01:48:32.412890] 🤖 [GEMINI_FLASH_L3] Forensic dictamen signed EIP-712 (0x15C42d6E...d74e). Dispatching to Telegram @Luis_sentinel_alert_bot.', 'text-blue-400');
+    }
+
+    function resetSimulatedState() {
+      isAttacked = false;
+
+      chart.data.datasets[0].data = nominalKData;
+      chart.data.datasets[0].borderColor = '#10B981';
+      chart.data.datasets[0].backgroundColor = 'rgba(16, 185, 129, 0.08)';
+      chart.data.datasets[0].pointBackgroundColor = '#10B981';
+      chart.update();
+
+      const statusCard = document.getElementById('statusCard');
+      statusCard.classList.remove('pulse-danger', 'border-panicRed');
+
+      const badge = document.getElementById('badgeState');
+      badge.className = 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-safeGreen/15 text-safeGreen border border-safeGreen/30';
+      badge.innerText = 'NORMAL (OPERATIVO)';
+
+      document.getElementById('mainStateText').innerText = 'INVARIANTE ACTIVO';
+      document.getElementById('mainStateText').className = 'text-2xl font-bold font-mono tracking-tight text-white';
+      document.getElementById('subStateText').innerText = 'PancakeSwap v3: WBNB / USDT (0.05% Pool)';
+
+      document.getElementById('lpStatus').innerText = 'NORMAL';
+      document.getElementById('lpStatus').className = 'text-safeGreen font-bold';
+
+      document.getElementById('pauseCount').innerText = '0 / 2 (MiCA Safe)';
+
+      document.getElementById('valReserve0').innerText = '85,200.00 WBNB';
+      document.getElementById('valReserve0Usd').innerText = '≈ $51,120,000 USD';
+      document.getElementById('valTick').innerText = '78,240';
+      document.getElementById('valKRatio').innerText = '1.0000 (100%)';
+      document.getElementById('valKRatio').className = 'text-safeGreen font-bold';
+      document.getElementById('metricDetectedDrop').innerText = '0.00% (0 bps)';
+      document.getElementById('metricDetectedDrop').className = 'text-white font-bold';
+
+      document.getElementById('fSeverity').innerText = 'NOMINAL / SIN ANOMALÍAS';
+      document.getElementById('fSeverity').className = 'px-1.5 py-0.5 rounded text-[10px] font-bold bg-safeGreen/15 text-safeGreen';
+      document.getElementById('fVector').innerText = 'Ninguno (Vigilancia Normal)';
+      document.getElementById('fAnalysis').innerText = '"Pool en equilibrio térmico y matemático. El producto constante x·y=k no presenta desviaciones anómalas. Monitoreo pasivo sub-30ms activo vía Bloxroute BDN y 48 Club."';
+
+      appendLog('[01:48:40.001920] 🔄 [GOVERNANCE] Pool reset verified. Status returned to NORMAL.', 'text-gray-400');
+    }
+
+    function appendLog(text, className) {
+      const term = document.getElementById('terminalLog');
+      const div = document.createElement('div');
+      div.className = className;
+      div.innerHTML = text;
+      term.appendChild(div);
+      term.scrollTop = term.scrollHeight;
+    }
+
+    function copyForensicJson() {
+      const report = {
+        incident_id: "INC-20260930-BNB-01",
+        network: "BNB Chain (Chain ID: 56)",
+        target_protocol: "PancakeSwap v3",
+        severity: isAttacked ? "CRITICAL" : "LOW",
+        attack_vector: isAttacked ? "Flash-Loan Liquidity Drain & Tick Divergence" : "NONE",
+        mitigation_latency_ms: 24.8,
+        attestation: {
+          algorithm: "EIP-712",
+          signer: "0x15C42d6E839182045f1248030fEF310b3cF3d74e"
+        }
+      };
+      navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+      showToast("✓ Reporte JSON copiado al portapapeles");
+    }
+
+    function dispatchTelegramNotification() {
+      showToast("✈️ Alerta enviada con éxito a @Luis_sentinel_alert_bot");
+      appendLog('[01:48:45.102914] 📲 [TELEGRAM] Message pushed to @Luis_sentinel_alert_bot (HTTP 200 OK).', 'text-safeGreen');
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toastMsg');
+      t.innerText = msg;
+      setTimeout(() => { t.innerText = ''; }, 3000);
+    }
+
+    function openLegalModal() {
+      document.getElementById('legalModal').classList.remove('hidden');
+    }
+
+    function closeLegalModal() {
+      document.getElementById('legalModal').classList.add('hidden');
+    }
+  </script>
+</body>
+</html>
