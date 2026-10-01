@@ -6,7 +6,7 @@ import "./interfaces/IPancakeV3Pool.sol";
 
 /// @title BNBProtectedPoolReceiver - Production-Grade Concentrated Liquidity Vault & Safe Exit Hook
 /// @notice Manages PancakeSwap v3 LP positions with atomic circuit breaker pauses and non-custodial emergency wind-down
-/// @dev Hardened against Reentrancy (H-R1), Global Liquidity Share Overburn (H-R2), and Unbacked Mints (H-R3)
+/// @dev Hardened against Reentrancy (H-R1), Global Liquidity Share Overburn (H-R2), Unbacked Mints (H-R3), and Emergency Capital Evacuation (B-5)
 contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
     address public immutable targetPool;
     address public immutable token0;
@@ -22,6 +22,7 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
 
     // H-R2: Track receiver's OWN position liquidity (not global pool liquidity)
     uint128 public ownPositionLiquidity;
+    uint128 public retreatedLiquidity; // B-5: Tracks liquidity evacuated into vault during active pause
 
     mapping(address => uint256) public lpBalances;
     uint256 public totalLpSupply;
@@ -32,6 +33,8 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
     event CircuitBreakerUpdated(address indexed previousBreaker, address indexed newBreaker);
     event LiquidityManagerUpdated(address indexed previousManager, address indexed newManager);
     event EmergencyPauseActivated();
+    event EmergencyLiquidityRetreated(uint128 liquidityBurned);
+    event LiquidityRestored(uint128 liquidityMinted);
     event EmergencyUnpaused();
     event EmergencyWindDownTriggered();
     event LiquidityDeposited(address indexed user, uint128 liquidityMinted, uint256 amount0Used, uint256 amount1Used);
@@ -96,8 +99,24 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
         liquidityManager = _liquidityManager;
     }
 
-    function emergencyPause() external onlyCircuitBreaker {
+    /// @notice B-5: Atomic capital evacuation on emergency pause (active safeguarding)
+    /// @dev Burns active position from compromised pool and collects all underlying tokens to vault
+    function emergencyPause() external onlyCircuitBreaker nonReentrant {
         paused = true;
+        if (ownPositionLiquidity > 0) {
+            uint128 liq = ownPositionLiquidity;
+            retreatedLiquidity += liq;
+            ownPositionLiquidity = 0;
+            IPancakeV3Pool(targetPool).burn(tickLower, tickUpper, liq);
+            IPancakeV3Pool(targetPool).collect(
+                address(this),
+                tickLower,
+                tickUpper,
+                type(uint128).max,
+                type(uint128).max
+            );
+            emit EmergencyLiquidityRetreated(liq);
+        }
         emit EmergencyPauseActivated();
     }
 
@@ -107,14 +126,33 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
         emit EmergencyUnpaused();
     }
 
+    /// @notice Re-deploys sheltered liquidity back into PancakeSwap v3 once crisis is safely resolved
+    function restoreRetreatedLiquidity() external onlyLiquidityManager whenNotPaused nonReentrant returns (uint256 amount0, uint256 amount1) {
+        require(retreatedLiquidity > 0, "NO_RETREATED_LIQUIDITY");
+        uint128 liq = retreatedLiquidity;
+        retreatedLiquidity = 0;
+
+        // Uses pre-funded tokens currently sheltered in address(this)
+        (amount0, amount1) = IPancakeV3Pool(targetPool).mint(
+            address(this),
+            tickLower,
+            tickUpper,
+            liq,
+            "" // Empty data triggers pre-funded branch in callback
+        );
+
+        ownPositionLiquidity += liq;
+        emit LiquidityRestored(liq);
+    }
+
     function emergencyWindDown() external onlyCircuitBreaker {
         paused = true;
         emergencyWindDownActive = true;
         emit EmergencyWindDownTriggered();
     }
 
-    /// @notice H-R3: Deposit underlying tokens and mint active concentrated liquidity on PancakeSwap v3
-    /// @dev Fully backed: pulls tokens, mints on-chain position, updates ownPositionLiquidity and credits shares
+    /// @notice H-R3 & B-1: Deposit underlying tokens and mint active concentrated liquidity on PancakeSwap v3
+    /// @dev Fully backed: passes payer (msg.sender) so pancakeV3MintCallback pulls tokens via transferFrom
     function depositLiquidity(
         address user,
         uint128 liquidityAmount
@@ -122,13 +160,13 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
         require(user != address(0), "INVALID_USER");
         require(liquidityAmount > 0, "INVALID_LIQUIDITY_AMOUNT");
 
-        // Mint position on PancakeSwap v3 pool (triggers pancakeV3MintCallback)
+        // B-1: Encode msg.sender (liquidity manager or vault) as payer for callback
         (amount0, amount1) = IPancakeV3Pool(targetPool).mint(
             address(this),
             tickLower,
             tickUpper,
             liquidityAmount,
-            ""
+            abi.encode(msg.sender)
         );
 
         ownPositionLiquidity += liquidityAmount;
@@ -171,7 +209,7 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
         require(lpBalances[msg.sender] >= lpAmount, "INSUFFICIENT_LP_BALANCE");
         require(totalLpSupply > 0, "ZERO_TOTAL_SUPPLY");
 
-        // H-R2: Calculate burn strictly against the receiver's own position liquidity
+        // H-R2: Calculate burn strictly against the receiver's own position liquidity (if any left unretreated)
         if (ownPositionLiquidity > 0) {
             uint128 liqToBurn = uint128((uint256(ownPositionLiquidity) * lpAmount) / totalLpSupply);
             if (liqToBurn > 0) {

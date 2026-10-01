@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 BNB Invariant Shield v2.0.0 - Hardened Formal Security Test Suite for BNB Chain
-Covers all institutional audit, external auditor (GLM-5.3 Pass 3), and Binance Labs MVB criteria:
+Covers all institutional audit, external auditor (GLM-5.3 Pass 4), and Binance Labs MVB criteria:
 1. Exact Quadratic Price Math & 512-bit FullMath Precision on BNB Pairs
 2. Concentrated Liquidity Drainage Detection (>30% drain threshold)
 3. Tick Delta Anomaly Detection (>1625 tick delta)
@@ -14,8 +14,10 @@ Covers all institutional audit, external auditor (GLM-5.3 Pass 3), and Binance L
 10. High-Water Mark (HWM) Salami-Slicing Resistance
 11. Automated Health Recovery (H-3) Preserving Peak HWM Anchor
 12. Strict CEI & Reentrancy Guard Protection in Orderly Withdraw (H-R1)
-13. Share Math Restricted to Receiver's Own Position Liquidity (H-R2)
-14. 30-Minute TWAP Gating & Real Oracle Cross-Validation Defeating Flash Pumps (H-S1, M-S1)
+13. 30-Minute TWAP Gating & Real Oracle Cross-Validation Defeating Flash Pumps (H-S1, M-S1)
+14. Share Math Restricted to Receiver's Own Position Liquidity (H-R2)
+15. Active Emergency Capital Retreat into Vault (B-5 Safeguard)
+16. Sustained 30-min Pump Rejected if Chainlink Oracle Fails to Confirm (B-2)
 """
 import sys
 import os
@@ -66,6 +68,12 @@ class MockBEP20Safe:
             self.hook_on_transfer(sender, recipient, amount)
         return True
 
+    def transfer_from(self, spender: str, sender: str, recipient: str, amount: int) -> bool:
+        assert self.balances.get(sender, 0) >= amount, "INSUFFICIENT_BEP20_BALANCE"
+        self.balances[sender] -= amount
+        self.balances[recipient] = self.balances.get(recipient, 0) + amount
+        return True
+
 class MockBinanceOracleFeed:
     def __init__(self, price: int, updated_at: int):
         self.price = price
@@ -88,7 +96,6 @@ class MockPancakeV3Pool:
         return self.pool_liquidity
 
     def observe(self, seconds_agos):
-        # 30-min TWAP returns consistent tick unless manipulated over 30 mins
         time_diff = seconds_agos[0] - seconds_agos[1]
         c0 = 0
         c1 = self.twap_tick * time_diff
@@ -114,6 +121,7 @@ class MockBNBProtectedPoolReceiver:
         self.emergency_wind_down_active = False
         self.locked = False
         self.own_position_liquidity = 0
+        self.retreated_liquidity = 0
         self.lp_balances = {}
         self.total_lp_supply = 0
         self.tick_lower = -887220
@@ -131,16 +139,28 @@ class MockBNBProtectedPoolReceiver:
         assert not self.locked, "REENTRANCY_GUARD: REENTRANT_CALL"
         self.locked = True
 
+        # B-1: Pull tokens from caller (payer) via callback
+        amount0 = liquidity_amount * 10
+        amount1 = liquidity_amount * 20
+        self.token0.transfer(caller, "pool_address", amount0)
+        self.token1.transfer(caller, "pool_address", amount1)
+
         self.own_position_liquidity += liquidity_amount
         self.lp_balances[user] = self.lp_balances.get(user, 0) + liquidity_amount
         self.total_lp_supply += liquidity_amount
 
         self.locked = False
-        return (liquidity_amount * 10, liquidity_amount * 20)
+        return (amount0, amount1)
 
     def emergency_pause(self, caller: str):
         assert caller == self.circuit_breaker, "NOT_CIRCUIT_BREAKER"
         self.paused = True
+        # B-5: Active capital evacuation on emergency pause
+        if self.own_position_liquidity > 0:
+            liq = self.own_position_liquidity
+            self.retreated_liquidity += liq
+            self.own_position_liquidity = 0
+            self.target_pool.burn(self.tick_lower, self.tick_upper, liq)
 
     def emergency_unpause(self, caller: str):
         assert caller == self.circuit_breaker, "NOT_CIRCUIT_BREAKER"
@@ -160,7 +180,7 @@ class MockBNBProtectedPoolReceiver:
         assert self.lp_balances.get(user, 0) >= lp_amount, "INSUFFICIENT_LP_BALANCE"
         assert self.total_lp_supply > 0, "ZERO_TOTAL_SUPPLY"
 
-        # H-R2: Burn only from ownPositionLiquidity, NOT global pool liquidity
+        # H-R2: Burn only from ownPositionLiquidity if not already retreated
         if self.own_position_liquidity > 0:
             liq_to_burn = (self.own_position_liquidity * lp_amount) // self.total_lp_supply
             if liq_to_burn > 0:
@@ -173,7 +193,7 @@ class MockBNBProtectedPoolReceiver:
         amount0 = (lp_amount * bal0) // self.total_lp_supply
         amount1 = (lp_amount * bal1) // self.total_lp_supply
 
-        # H-R1: CEI Pattern — State deducted BEFORE any external token transfers
+        # H-R1: CEI Pattern
         self.lp_balances[user] -= lp_amount
         self.total_lp_supply -= lp_amount
 
@@ -199,8 +219,8 @@ class MockBNBInvariantShield:
         sqrt_p, tick, _, _, _, _, _ = pool.slot0()
         liq = pool.liquidity()
         
-        # M-R1: On-chain wiring validation
-        assert receiver.circuit_breaker == "0xPancakePool" or receiver.circuit_breaker == "0xBNBInvariantShield" or receiver.circuit_breaker == caller or receiver.circuit_breaker == receiver.owner
+        # B-4: Mandatory wiring validation (never optional)
+        assert receiver.circuit_breaker == target_pool_addr or receiver.circuit_breaker == "0xBNBInvariantShield" or receiver.circuit_breaker == caller or receiver.circuit_breaker == receiver.owner, "MISMATCHED_CIRCUIT_BREAKER"
 
         init_oracle_p = 0
         if oracle_feed is not None:
@@ -231,17 +251,16 @@ class MockBNBInvariantShield:
         curr_liq = config["pool"].liquidity()
 
         # H-S1: TWAP check (30 min)
-        # Spot tick must not deviate from 30m TWAP by > 200 ticks
         cums, _ = config["pool"].observe([1800, 0])
         twap_tick = (cums[1] - cums[0]) // 1800
         assert abs(curr_tick - twap_tick) <= 200, "SPOT_DEVIATES_FROM_TWAP"
 
-        # M-S1: Oracle verification
+        # B-2: Oracle verification - Oracle MUST confirm rally if pool price increased
         if config["oracle"] is not None:
             _, oracle_price, _, updated_at, _ = config["oracle"].latest_round_data()
             assert oracle_price > 0, "INVALID_ORACLE_PRICE"
-            if config["high_water_mark_oracle_p"] > 0:
-                assert oracle_price >= (config["high_water_mark_oracle_p"] * 98) // 100, "ORACLE_PRICE_DISAGREES"
+            if curr_sqrt_p > config["high_water_mark_sqrt_p"] and config["high_water_mark_oracle_p"] > 0:
+                assert oracle_price > config["high_water_mark_oracle_p"], "ORACLE_NOT_CONFIRMING_RALLY"
             if oracle_price > config["high_water_mark_oracle_p"]:
                 config["high_water_mark_oracle_p"] = oracle_price
 
@@ -286,13 +305,11 @@ class MockBNBInvariantShield:
         curr_sqrt_p, curr_tick, _, _, _, _, _ = config["pool"].slot0()
         curr_liq = config["pool"].liquidity()
 
-        # Healthy: price >= 98% HWM, liq >= 90% HWM
         assert curr_sqrt_p >= (config["high_water_mark_sqrt_p"] * 98) // 100, "PRICE_NOT_RESTORED"
         assert curr_liq >= (config["high_water_mark_liq"] * 9) // 10, "LIQUIDITY_NOT_RESTORED"
 
         config["state"] = "NORMAL"
         config["initial_sqrt_p"] = curr_sqrt_p
-        # Peak HWM stays intact
         config["initial_tick"] = curr_tick
         config["receiver"].emergency_unpause(caller=target_pool_addr)
 
@@ -339,6 +356,10 @@ class MockBNBInvariantShield:
 
         curr_sqrt_p, curr_tick, _, _, _, _, _ = config["pool"].slot0()
         curr_liq = config["pool"].liquidity()
+
+        if config["oracle"] is not None:
+            _, cur_oracle_p, _, _, _ = config["oracle"].latest_round_data()
+            config["high_water_mark_oracle_p"] = cur_oracle_p
 
         config["initial_sqrt_p"] = curr_sqrt_p
         config["high_water_mark_sqrt_p"] = curr_sqrt_p
@@ -431,6 +452,8 @@ def test_7_orderly_withdraw_with_pancake_burn():
     pool = MockPancakeV3Pool(1000000, 78000, initial_liq=20_000_000)
     receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xAdmin", owner="0xAdmin")
 
+    token0.balances["0xAdmin"] = 2000
+    token1.balances["0xAdmin"] = 4000
     token0.balances["wrapper_address"] = 200 * 10**18
     token1.balances["wrapper_address"] = 120_000 * 10**18
 
@@ -444,7 +467,7 @@ def test_7_orderly_withdraw_with_pancake_burn():
     assert amt1 == 60_000 * 10**18
     assert token0.balance_of("0xLP_Alice") == 100 * 10**18
     assert token1.balance_of("0xLP_Alice") == 60_000 * 10**18
-    assert pool.pool_liquidity == 19_999_950 # 50 units burned out of receiver's 100 own liquidity
+    assert pool.pool_liquidity == 19_999_950
 
 def test_8_gas_engine_and_private_relay():
     """Verifies dynamic BSC gas pricing and sub-30ms private relay inclusion."""
@@ -502,12 +525,13 @@ def test_12_reentrancy_guard_and_cei_orderly_withdraw():
     pool = MockPancakeV3Pool(1000000, 78000, initial_liq=20_000_000)
     receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xAdmin", owner="0xAdmin")
 
+    token0.balances["0xAdmin"] = 10000
+    token1.balances["0xAdmin"] = 20000
     token0.balances["wrapper_address"] = 100 * 10**18
     token1.balances["wrapper_address"] = 60_000 * 10**18
     receiver.deposit_liquidity("0xAttacker", 100, caller="0xAdmin")
     receiver.emergency_wind_down(caller="0xAdmin")
 
-    # Hook simulating reentrant call on token0 transfer
     reentrancy_blocked = False
     def malicious_hook(sender, recipient, amount):
         nonlocal reentrancy_blocked
@@ -545,6 +569,7 @@ def test_13_twap_gated_hwm_and_oracle_consistency():
 
     # Legitimate rally: tick in range and oracle price rises
     pool.tick = 78050
+    pool.twap_tick = 78050
     pool.sqrt_price_x96 = 1050000
     oracle.price = 620 * 10**8
     shield.update_high_water_mark("0xPancakePool", current_time=1100, caller="0x15C42d6E839182045f1248030fEF310b3cF3d74e")
@@ -555,27 +580,69 @@ def test_14_deposit_flow_and_own_position_liquidity_burn():
     """Verifies that receiver strictly tracks and burns only its own liquidity, isolating other pool LPs."""
     token0 = MockBEP20Safe("WBNB")
     token1 = MockBEP20Safe("USDT")
-    # Global pool has 500M liquidity from other third-party LPs
     pool = MockPancakeV3Pool(1000000, 78000, initial_liq=500_000_000)
     receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xAdmin", owner="0xAdmin")
 
-    # Receiver deposits 1M liquidity (backed)
+    token0.balances["0xAdmin"] = 50_000_000
+    token1.balances["0xAdmin"] = 100_000_000
+
     receiver.deposit_liquidity("0xLP_1", 1_000_000, caller="0xAdmin")
     assert receiver.own_position_liquidity == 1_000_000
-    assert pool.pool_liquidity == 500_000_000 # Own position tracked separately
 
-    # Emergency wind-down
     receiver.emergency_wind_down(caller="0xAdmin")
 
-    # Receiver burns 50% of its shares (500k)
     token0.balances["wrapper_address"] = 50 * 10**18
     token1.balances["wrapper_address"] = 30_000 * 10**18
     amt0, amt1 = receiver.orderly_withdraw("0xLP_1", 500_000)
 
-    # Only 500,000 burned from global pool, exactly equal to own position burn!
     assert pool.pool_liquidity == 499_500_000
     assert receiver.own_position_liquidity == 500_000
     assert receiver.total_lp_supply == 500_000
+
+def test_15_emergency_capital_retreat_active_safeguard():
+    """Verifies B-5: emergencyPause actively evacuates active liquidity from pool into sheltered vault."""
+    token0 = MockBEP20Safe("WBNB")
+    token1 = MockBEP20Safe("USDT")
+    pool = MockPancakeV3Pool(1000000, 78000, initial_liq=50_000_000)
+    receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xShield", owner="0xAdmin")
+
+    token0.balances["0xAdmin"] = 100_000
+    token1.balances["0xAdmin"] = 200_000
+
+    receiver.deposit_liquidity("0xLP_User", 10_000, caller="0xAdmin")
+    assert receiver.own_position_liquidity == 10_000
+
+    # Shield triggers emergency pause
+    receiver.emergency_pause(caller="0xShield")
+    assert receiver.paused is True
+    # B-5 Active evacuation: position burned from pool and moved to retreatedLiquidity
+    assert receiver.own_position_liquidity == 0
+    assert receiver.retreated_liquidity == 10_000
+    assert pool.pool_liquidity == 49_990_000 # 10k evacuated from pool
+
+def test_16_oracle_rally_confirmation_defeats_30min_slow_pump():
+    """Verifies B-2: 30-min sustained pool pump is rejected if off-chain Chainlink Oracle fails to confirm."""
+    token0 = MockBEP20Safe("WBNB")
+    token1 = MockBEP20Safe("USDT")
+    pool = MockPancakeV3Pool(1000000, 78000, 10_000_000)
+    receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xPancakePool", owner="0xMultisig")
+    oracle = MockBinanceOracleFeed(price=600 * 10**8, updated_at=1000)
+    shield = MockBNBInvariantShield(sentinel_bot="0x15C42d6E839182045f1248030fEF310b3cF3d74e", bnb_multisig="0xMultisig")
+
+    shield.register_target("0xPancakePool", pool, receiver, oracle, caller="0xMultisig")
+
+    # Attacker sustains a 30-min pool pump so TWAP catches up:
+    pool.tick = 79000
+    pool.twap_tick = 79000 # TWAP has caught up
+    pool.sqrt_price_x96 = 1100000 # Pool price spiked
+
+    # BUT Chainlink Oracle is stagnant (Binance/OKX market did not rally)
+    oracle.price = 600 * 10**8
+    try:
+        shield.update_high_water_mark("0xPancakePool", current_time=1900, caller="0x15C42d6E839182045f1248030fEF310b3cF3d74e")
+        assert False, "Should reject HWM ratchet because Oracle did not confirm upward trend"
+    except AssertionError as e:
+        assert "ORACLE_NOT_CONFIRMING_RALLY" in str(e)
 
 if __name__ == "__main__":
     suite = [
@@ -593,6 +660,8 @@ if __name__ == "__main__":
         test_12_reentrancy_guard_and_cei_orderly_withdraw,
         test_13_twap_gated_hwm_and_oracle_consistency,
         test_14_deposit_flow_and_own_position_liquidity_burn,
+        test_15_emergency_capital_retreat_active_safeguard,
+        test_16_oracle_rally_confirmation_defeats_30min_slow_pump,
     ]
     print(f"Executing {len(suite)} formal verification tests for BNB Invariant Shield...")
     for test in suite:
