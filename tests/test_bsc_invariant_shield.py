@@ -221,6 +221,12 @@ class MockBNBProtectedPoolReceiver:
                 self.own_position_liquidity -= liq_to_burn
                 self.target_pool.burn(self.tick_lower, self.tick_upper, liq_to_burn)
 
+        # P7-M1: Pro-rata deduction of retreated liquidity if withdrawal occurs during active pause
+        if self.retreated_liquidity > 0:
+            retreated_deduct = (self.retreated_liquidity * lp_amount) // self.total_lp_supply
+            if retreated_deduct > 0:
+                self.retreated_liquidity -= retreated_deduct
+
         bal0 = self.token0.balance_of("wrapper_address")
         bal1 = self.token1.balance_of("wrapper_address")
 
@@ -781,6 +787,47 @@ def test_19_non_custodial_lp_redemption_post_governance_restoration():
     assert receiver.lp_balances["0xPassiveLP"] == 0
     assert receiver.total_lp_supply == 0
 
+def test_20_retreated_liquidity_deduction_on_pause_withdrawal_defeats_p7_m1():
+    """Validates that withdrawing during pause reduces retreatedLiquidity proportionally (defeats P7-M1)."""
+    token0 = MockBEP20Safe("WBNB")
+    token1 = MockBEP20Safe("USDT")
+    pool = MockPancakeV3Pool(1000000, 78000, 10_000_000)
+    receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xAdmin", owner="0xAdmin")
+
+    token0.balances["0xAdmin"] = 20000
+    token1.balances["0xAdmin"] = 40000
+    token0.balances["wrapper_address"] = 100 * 10**18
+    token1.balances["wrapper_address"] = 60_000 * 10**18
+
+    # Deposit for two LPs: LP A has 500, LP B has 500 (total = 1000)
+    receiver.deposit_liquidity("0xLpA", 500, caller="0xAdmin")
+    receiver.deposit_liquidity("0xLpB", 500, caller="0xAdmin")
+    assert receiver.own_position_liquidity == 1000
+    assert receiver.total_lp_supply == 1000
+
+    # Emergency pause: retreats all 1000 liquidity to vault
+    receiver.emergency_pause(caller="0xAdmin")
+    assert receiver.paused is True
+    assert receiver.own_position_liquidity == 0
+    assert receiver.retreated_liquidity == 1000
+
+    # LP A withdraws 500 during pause
+    receiver.orderly_withdraw("0xLpA", 500)
+    assert receiver.lp_balances["0xLpA"] == 0
+    assert receiver.total_lp_supply == 500
+    # P7-M1 Fix: retreated_liquidity MUST be reduced by 500 to reflect true remaining sheltered capital!
+    assert receiver.retreated_liquidity == 500, "Retreated liquidity must be deducted on withdrawal during pause"
+
+    # Pool unpauses
+    receiver.emergency_unpause(caller="0xAdmin")
+    assert receiver.paused is False
+
+    # Manager restores retreated liquidity: restores exactly 500 (not 1000)
+    restored = receiver.restore_retreated_liquidity(caller="0xAdmin")
+    assert restored == 500
+    assert receiver.own_position_liquidity == 500
+    assert receiver.retreated_liquidity == 0
+
 if __name__ == "__main__":
     suite = [
         test_1_exact_512bit_quadratic_math,
@@ -802,6 +849,7 @@ if __name__ == "__main__":
         test_17_auto_recover_with_retreated_capital_defeats_n1_deadlock,
         test_18_active_mint_payer_defeats_third_party_callback_injection,
         test_19_non_custodial_lp_redemption_post_governance_restoration,
+        test_20_retreated_liquidity_deduction_on_pause_withdrawal_defeats_p7_m1,
     ]
     print(f"Executing {len(suite)} formal verification tests for BNB Invariant Shield...")
     for test in suite:

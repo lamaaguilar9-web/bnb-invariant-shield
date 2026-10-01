@@ -256,6 +256,14 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
             }
         }
 
+        // P7-M1: Pro-rata deduction of retreated liquidity if withdrawal occurs during active pause
+        if (retreatedLiquidity > 0) {
+            uint128 retreatedDeduct = uint128((uint256(retreatedLiquidity) * lpAmount) / totalLpSupply);
+            if (retreatedDeduct > 0) {
+                retreatedLiquidity -= retreatedDeduct;
+            }
+        }
+
         uint256 bal0 = IBEP20(token0).balanceOf(address(this));
         uint256 bal1 = IBEP20(token1).balanceOf(address(this));
 
