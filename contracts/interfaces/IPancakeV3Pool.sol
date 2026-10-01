@@ -47,4 +47,12 @@ interface IPancakeV3Pool {
         uint128 amount0Requested,
         uint128 amount1Requested
     ) external returns (uint128 amount0, uint128 amount1);
+
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (
+            int56[] memory tickCumulatives,
+            uint160[] memory secondsPerLiquidityCumulativeX128s
+        );
 }
