@@ -36,15 +36,17 @@ contract BNBInvariantShield {
         uint256 consecutivePauses;
         uint256 maxDeviationBps;
         int24 maxTickDelta;
+        uint256 maxDrainBps;
     }
 
     mapping(address => TargetConfig) public targets;
 
     event TargetRegistered(address indexed targetPool, address indexed poolReceiver, address oracleFeed);
     event HighWaterMarkUpdated(address indexed targetPool, uint160 newHighWaterMarkSqrtPriceX96);
-    event RiskParametersUpdated(address indexed targetPool, uint256 maxDeviationBps, int24 maxTickDelta);
+    event RiskParametersUpdated(address indexed targetPool, uint256 maxDeviationBps, int24 maxTickDelta, uint256 maxDrainBps);
     event EmergencyPauseTriggered(address indexed targetPool, uint160 currentSqrtPriceX96, uint128 currentLiquidity, address indexed triggeredBy);
     event TargetUnpausedByMultisig(address indexed targetPool, address indexed unpausedBy);
+    event AutoRecoveryTriggered(address indexed targetPool, uint160 currentSqrtPriceX96, uint128 currentLiquidity);
     event EmergencyWindDownActivated(address indexed targetPool, uint256 timestamp);
     event RoleGranted(bytes32 indexed role, address indexed account);
     event RoleRevoked(bytes32 indexed role, address indexed account);
@@ -105,7 +107,8 @@ contract BNBInvariantShield {
             lastPauseTimestamp: 0,
             consecutivePauses: 0,
             maxDeviationBps: DEFAULT_MAX_DEVIATION_BPS,
-            maxTickDelta: DEFAULT_MAX_TICK_DELTA
+            maxTickDelta: DEFAULT_MAX_TICK_DELTA,
+            maxDrainBps: DEFAULT_MAX_DRAIN_BPS
         });
 
         emit TargetRegistered(targetPool, poolReceiver, oracleFeed);
@@ -126,20 +129,23 @@ contract BNBInvariantShield {
     }
 
     /// @notice Configures custom invariant risk parameters for a protected pool
-    /// @dev Validates bounds: maxDeviationBps in [2, 10000], maxTickDelta > 0 (GLM-5.3 audit checklist point 7)
+    /// @dev Validates bounds: maxDeviationBps in [2, 10000], maxDrainBps in [1, 10000], maxTickDelta > 0 (GLM-5.3 audit checklist point 7)
     function updateTargetRiskParameters(
         address targetPool,
         uint256 maxDeviationBps,
-        int24 maxTickDelta
+        int24 maxTickDelta,
+        uint256 maxDrainBps
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         TargetConfig storage config = targets[targetPool];
         require(config.isRegistered, "NOT_REGISTERED");
         require(maxDeviationBps >= 2 && maxDeviationBps <= 10000, "INVALID_BPS_RANGE");
         require(maxTickDelta > 0, "INVALID_TICK_DELTA");
+        require(maxDrainBps >= 1 && maxDrainBps <= 10000, "INVALID_DRAIN_RANGE");
 
         config.maxDeviationBps = maxDeviationBps;
         config.maxTickDelta = maxTickDelta;
-        emit RiskParametersUpdated(targetPool, maxDeviationBps, maxTickDelta);
+        config.maxDrainBps = maxDrainBps;
+        emit RiskParametersUpdated(targetPool, maxDeviationBps, maxTickDelta, maxDrainBps);
     }
 
     /// @notice Triggers emergency circuit breaker pause if and only if on-chain invariant breach is mathematically verified
@@ -175,10 +181,11 @@ contract BNBInvariantShield {
             config.maxTickDelta
         );
 
+        uint256 targetDrainBps = config.maxDrainBps > 0 ? config.maxDrainBps : DEFAULT_MAX_DRAIN_BPS;
         (bool drainExceeded, ) = PancakeV3InvariantChecker.checkLiquidityDrain(
             config.initialLiquidity,
             currentLiquidity,
-            DEFAULT_MAX_DRAIN_BPS
+            targetDrainBps
         );
 
         require(dropExceeded || tickExceeded || drainExceeded, "INVARIANT_HEALTHY");
@@ -191,6 +198,34 @@ contract BNBInvariantShield {
         require(success, "WRAPPER_PAUSE_FAILED");
 
         emit EmergencyPauseTriggered(targetPool, currentSqrtPriceX96, currentLiquidity, msg.sender);
+    }
+
+    /// @notice Automated safety recovery if invariant health is fully restored and sustained for > 5 minutes
+    /// @dev Prevents flash-loan DoS griefing and unblocks client PayFi rails without slow multisig latency
+    function autoRecoverIfHealthy(address targetPool) external onlyRole(PAUSER_ROLE) {
+        TargetConfig storage config = targets[targetPool];
+        require(config.isRegistered, "NOT_REGISTERED");
+        require(config.state == PoolState.PAUSED, "NOT_PAUSED");
+        require(block.timestamp >= config.lastPauseTimestamp + 5 minutes, "COOLDOWN_ACTIVE");
+
+        (uint160 currentSqrtPriceX96, int24 currentTick,,,,,) = IPancakeV3Pool(targetPool).slot0();
+        uint128 currentLiquidity = IPancakeV3Pool(targetPool).liquidity();
+
+        // Invariant health check: price within 2% of HWM and liquidity >= 90% of initial
+        uint160 minHealthyPrice = uint160((uint256(config.highWaterMarkSqrtPriceX96) * 98) / 100);
+        require(currentSqrtPriceX96 >= minHealthyPrice, "PRICE_NOT_RESTORED");
+        require(currentLiquidity >= (config.initialLiquidity * 9) / 10, "LIQUIDITY_NOT_RESTORED");
+
+        config.state = PoolState.NORMAL;
+        config.initialSqrtPriceX96 = currentSqrtPriceX96;
+        config.highWaterMarkSqrtPriceX96 = currentSqrtPriceX96;
+        config.initialTick = currentTick;
+        config.consecutivePauses = 0;
+
+        (bool success, ) = config.poolReceiver.call(abi.encodeWithSignature("emergencyUnpause()"));
+        require(success, "WRAPPER_UNPAUSE_FAILED");
+
+        emit AutoRecoveryTriggered(targetPool, currentSqrtPriceX96, currentLiquidity);
     }
 
     /// @notice Unpauses target pool with on-chain oracle and market restoration verification
