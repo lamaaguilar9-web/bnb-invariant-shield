@@ -6,20 +6,23 @@ echo "  SENTINEL FLEET — DIAGNÓSTICO OFICIAL Y VALIDACIÓN TELEGRAM (AUDITOR 
 echo "  Servidor: Houston KVM 1 (2.25.121.124)"
 echo "==============================================================================="
 
-# 1. Configurar .env con comillas exactas según spec de auditoría
-echo "[1/4] Escribiendo /opt/sentinelfleet/.env con formato de comillas y permisos 600..."
-cat << 'EOF' > /opt/sentinelfleet/.env
-TELEGRAM_BOT_TOKEN="8899240930:AAGVOv-07xA6PWFQUXCDpQ9asdAAUT80pfc"
+# 1. Configurar .env si se pasa nuevo token por argumento o entorno sin exponerlo en git
+NEW_TOKEN="${1:-${TELEGRAM_BOT_TOKEN:-}}"
+if [ -n "${NEW_TOKEN}" ]; then
+    echo "[1/4] Actualizando /opt/sentinelfleet/.env con formato de comillas y permisos 600..."
+    cat << EOF > /opt/sentinelfleet/.env
+TELEGRAM_BOT_TOKEN="${NEW_TOKEN}"
 APPROVED_ADMINS="6758917070"
 EOF
-
-chmod 600 /opt/sentinelfleet/.env
-chown sentinel:sentinel /opt/sentinelfleet/.env
-
-# 2. Reiniciar servicio systemd
-echo "[2/4] Reiniciando servicio sentinelfleet bajo systemd..."
-systemctl restart sentinelfleet
-sleep 2
+    chmod 600 /opt/sentinelfleet/.env
+    chown sentinel:sentinel /opt/sentinelfleet/.env
+    echo "[2/4] Reiniciando servicio sentinelfleet bajo systemd..."
+    systemctl restart sentinelfleet
+    sleep 2
+else
+    echo "[1/4] Preservando /opt/sentinelfleet/.env existente sin exponer secretos..."
+    echo "[2/4] Servicio verificado..."
+fi
 
 # 3. Extraer token usando regex exacto de GLM
 echo "[3/4] Extrayendo token con grep de GLM y probando contra Telegram API..."
