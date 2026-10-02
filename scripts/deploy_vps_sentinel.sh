@@ -48,12 +48,20 @@ fi
 /opt/sentinelfleet/.venv/bin/pip install --upgrade pip
 /opt/sentinelfleet/.venv/bin/pip install certifi -r requirements.txt
 
-# 5. Configurar .env con variables confirmadas (chmod 600)
-echo "[5/7] Configurando .env con variables de producción obligatorias..."
-cat << 'EOF' > /opt/sentinelfleet/.env
-TELEGRAM_BOT_TOKEN="8899240930:AAE2jLLgaDSeV57LdKosbeOZjk9WatqO3Zs"
-APPROVED_ADMINS="6758917070"
+# 5. Configurar .env con variables de entorno (chmod 600)
+echo "[5/7] Verificando variables de entorno en /opt/sentinelfleet/.env..."
+if [ ! -f /opt/sentinelfleet/.env ]; then
+    if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+        echo "[-] ERROR: TELEGRAM_BOT_TOKEN no definido en el entorno. No se puede configurar .env sin token." >&2
+        exit 1
+    fi
+    cat << EOF > /opt/sentinelfleet/.env
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
+APPROVED_ADMINS="${APPROVED_ADMINS:-6758917070}"
 EOF
+else
+    echo "[+] /opt/sentinelfleet/.env ya existe en el servidor. Preservando secretos sin exponerlos en el script."
+fi
 
 chmod 600 /opt/sentinelfleet/.env
 chown -R sentinel:sentinel /opt/sentinelfleet
