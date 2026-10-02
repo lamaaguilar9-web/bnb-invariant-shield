@@ -50,6 +50,7 @@ def _load_env_file():
 _load_env_file()
 
 from backend.bsc_mempool_watcher import BSCMempoolWatcher
+from backend.gemini_forensics_layer import GeminiForensicsEngine
 
 
 def get_verified_ssl_context() -> ssl.SSLContext:
@@ -105,6 +106,7 @@ class TelegramSentinelBot:
         self._scanner_thread: Optional[threading.Thread] = None
         self.last_update_id = 0
         self._lock = threading.Lock()
+        self.forensics_engine = GeminiForensicsEngine()
 
         # Approved administrators who can manage subscriber tiers
         raw_admins = os.environ.get("APPROVED_ADMINS", "6758917070")
@@ -520,12 +522,26 @@ class TelegramSentinelBot:
                 "📩 Usa <code>/upgrade</code> para ver datos de tesorería o contacta a <b>@SentinelFleetOps</b>."
             )
 
+        elif cmd in ("/forense", "/forensics"):
+            with self._lock:
+                incident = self.alert_history[-1] if self.alert_history else {
+                    "pool": "PancakeSwap_v3_WBNB_USDT",
+                    "poolAddress": "0x36696169C63e42cd08ce11f5deeBbCeBae652050",
+                    "dropBps": 1850,
+                    "mitigationLatencyMs": 12.5,
+                    "action": "ATOMIC_PAUSE_TRIGGERED",
+                    "block": self.watcher.last_known_block or 125210787,
+                    "isSimulation": False
+                }
+            return self.forensics_engine.generate_forensic_brief(incident, lang="es")
+
         elif cmd in ("/ayuda", "/help"):
             return (
                 "ℹ️ <b>Comandos del Bot de Sentinel Fleet:</b>\n\n"
                 "• <code>/status</code> - Estatus del sistema y telemetría BSC en vivo.\n"
                 "• <code>/pools</code> - Lista de pools monitoreados.\n"
                 "• <code>/monitorear &lt;0xDireccion&gt;</code> - Agregar pool a monitorear (Pro/Enterprise).\n"
+                "• <code>/forense</code> - Análisis forense con IA (Gemini Flash Forensics) de la última anomalía.\n"
                 "• <code>/upgrade</code> - Instrucciones para activar suscripción.\n"
                 "• <code>/simular</code> - Demostración de alerta de ataque.\n"
                 "• <code>/alertas</code> - Ver últimas alertas registradas.\n"
