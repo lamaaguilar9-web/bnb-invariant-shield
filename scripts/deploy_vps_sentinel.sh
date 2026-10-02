@@ -101,7 +101,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now sentinelfleet
+systemctl restart sentinelfleet
+systemctl enable sentinelfleet
 sleep 2
 
 echo "==============================================================================="
