@@ -27,6 +27,8 @@ chown -R sentinel:sentinel /opt/sentinelfleet
 
 # 3. Sincronizar código desde repositorio oficial
 echo "[3/7] Sincronizando código desde GitHub (main)..."
+git config --global --add safe.directory /opt/sentinelfleet || true
+git config --global --add safe.directory /root/bnb-invariant-shield || true
 if [ -d /opt/sentinelfleet/.git ]; then
     cd /opt/sentinelfleet
     git fetch origin
@@ -66,11 +68,12 @@ fi
 chmod 600 /opt/sentinelfleet/.env
 chown -R sentinel:sentinel /opt/sentinelfleet
 
-# 6. Ejecutar validación pre-arranque (30/30 tests) en el host
-echo "[6/7] Ejecutando validación formal (30 tests) en el host de producción..."
+# 6. Ejecutar validación pre-arranque (34/34 tests) en el host
+echo "[6/7] Ejecutando validación formal (34 tests) en el host de producción..."
 cd /opt/sentinelfleet
 /opt/sentinelfleet/.venv/bin/python tests/test_bsc_invariant_shield.py
 /opt/sentinelfleet/.venv/bin/python -m unittest tests.test_telegram_sentinel_bot -v
+/opt/sentinelfleet/.venv/bin/python -m unittest tests.test_gemini_forensics -v
 
 # 7. Configurar e iniciar servicio systemd
 echo "[7/7] Configurando y arrancando sentinelfleet.service bajo systemd..."
