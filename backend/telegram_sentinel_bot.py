@@ -87,9 +87,9 @@ class TelegramSentinelBot:
         watcher: Optional[BSCMempoolWatcher] = None
     ):
         if bot_token is not None:
-            self.bot_token = bot_token.strip()
+            self.bot_token = bot_token.strip().strip('"').strip("'").replace('\\"', '').replace("'", "").strip()
         else:
-            self.bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+            self.bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip().strip('"').strip("'").replace('\\"', '').replace("'", "").strip()
 
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}" if self.bot_token else None
         self.watcher = watcher or BSCMempoolWatcher(chain_id=56)
@@ -570,8 +570,9 @@ if __name__ == "__main__":
     print("  Founder & Lead Systems Architect: Luis Aguilar")
     print("=" * 70)
     
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    bot = TelegramSentinelBot(bot_token=token)
+    raw_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    token = raw_token.strip().strip('"').strip("'").replace('\\"', '').replace("'", "").strip() if raw_token else ""
+    bot = TelegramSentinelBot(bot_token=token if token else None)
     
     if token:
         print("[+] Bot inicializado con Token real. Conectando a Telegram...")
