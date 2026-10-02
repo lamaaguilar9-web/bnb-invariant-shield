@@ -107,7 +107,7 @@ sudo systemctl enable --now sentinelfleet
 - [x] Claves de relay degradan honestamente a `RELAY_STANDBY_DRY_RUN` sin inventar transacciones
 - [x] Persistencia de `data/` bajo permisos `sentinel:sentinel`
 - [x] Monitoreo automático systemd (`RestartSec=5`, `ProtectSystem=strict`)
-- [x] Trazabilidad: commit `d52cadf` verificado en producción
+- [x] Trazabilidad y Saneamiento de Secretos: commits `d52cadf` y `cf76fac` (saneamiento de script de despliegue, inyección por .env protegido y rotación completa de credencial via BotFather)
 
 ## 9. Criterios de aceptación (firma)
 
