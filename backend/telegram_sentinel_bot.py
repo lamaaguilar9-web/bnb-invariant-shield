@@ -522,7 +522,7 @@ class TelegramSentinelBot:
                 "📩 Usa <code>/upgrade</code> para ver datos de tesorería o contacta a <b>@SentinelFleetOps</b>."
             )
 
-        elif cmd in ("/forense", "/forensics"):
+        elif cmd in ("/forense", "/forensics", "forense", "forensic"):
             with self._lock:
                 incident = self.alert_history[-1] if self.alert_history else {
                     "pool": "PancakeSwap_v3_WBNB_USDT",
