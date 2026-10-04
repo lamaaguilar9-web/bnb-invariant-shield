@@ -1,38 +1,31 @@
-# POLÍTICA DE PRIVACIDAD INSTITUCIONAL — BNB INVARIANT SHIELD
-**Entidad Operadora:** Luis Aguilar d/b/a Sentinel Fleet Technologies  
-**Identificador DMCA:** DMCA-1081204  
-**Dominio Principal:** `sentinelfleet.tech` | `api.sentinelfleet.tech`  
-**Última Actualización:** Septiembre 2026  
-**Contacto Oficial:** `luis.growthhq@gmail.com` / `lamaaguilar9@gmail.com`  
+# Política de Privacidad — BNB Invariant Shield
+
+**Entidad operadora:** Luis Aguilar d/b/a Sentinel Fleet Technologies
+**Contacto:** luis.growthhq@gmail.com
+**Última actualización:** octubre 2026
 
 ---
 
-## 1. Alcance y Principio Fundamental "Zero-PII"
-BNB Invariant Shield es una infraestructura no-custodial de ciberseguridad y mitigación de riesgos DeFi para BNB Smart Chain (BSC) y opBNB. 
+## 1. Principio Zero-PII
 
-El sistema opera bajo una estricta política de **Cero Datos de Identificación Personal (Zero-PII)**:
-* **Datos Procesados Exclusivamente:** Parámetros técnicos de ejecución *on-chain* disponibles públicamente en la blockchain (hashes de transacción, direcciones de contratos, balance de reservas $x \cdot y = k$, índices de ticks y precios de gas).
-* **Ausencia de Rastreo de Usuarios:** La plataforma no recopila, vende, monetiza ni almacena nombres, números de teléfono, direcciones físicas, documentos de identidad ni historiales de navegación de los usuarios finales de los pools descentralizados.
+BNB Invariant Shield es infraestructura no-custodial de monitoreo y mitigación de riesgos DeFi para BNB Smart Chain (BSC) y opBNB. El sistema **no recopila, vende ni almacena datos personales**: procesa exclusivamente datos públicos de la blockchain (hashes de transacción, direcciones de contratos, reservas de liquidez, índices de ticks, precios de gas) y telemetría técnica generada por el propio sistema. No existen cuentas de usuario, cookies de rastreo ni perfiles de comportamiento.
 
----
+## 2. Dónde viven los datos y cómo viajan
 
-## 2. Alojamiento de Servidores y Tráfico Internacional de Datos
-De conformidad con las leyes internacionales de protección de datos y el Artículo 31 de la Ley N° 787:
-* Los servidores de cómputo dedicados y los nodos centinela se alojan físicamente en centros de datos de alta seguridad en **Houston, Texas, Estados Unidos (IP: `2.25.121.124`)**.
-* Toda la telemetría transita exclusivamente a través de canales cifrados **TLS 1.3** con certificados SSL bancarios.
-* Los registros forenses locales consisten en volcados técnicos de ejecución y son respaldados diariamente de forma inmutable mediante `/usr/local/bin/sentinel_backup.sh` con retención segregada de 7 días.
+La infraestructura corre en un servidor dedicado del operador ubicado en **Houston, Texas, Estados Unidos**. El sitio principal `sentinelfleet.tech` opera por HTTPS con certificado Let's Encrypt. Algunos subdominios de demostración operan aún por HTTP y están en migración a TLS; por esa razón, por esas vías no se solicita ni se acepta información sensible.
 
----
+Los registros técnicos del sistema (bitácoras de ejecución y evidencia de monitoreo) se respaldan periódicamente de forma privada por el operador.
 
-## 3. Cláusula de Procesamiento de Inferencia de Inteligencia Artificial (Gemini Flash L3)
-Para la generación de reportes forenses post-mortem asistidos por IA:
-* **Contrato Comercial Empresarial:** Las consultas a los modelos de lenguaje se realizan bajo contratos comerciales empresariales de Google Cloud / Vertex AI.
-* **Garantía Estricta de "No-Training":** Los volcados técnicos y logs transmitidos para análisis forense **NUNCA son almacenados ni utilizados para reentrenar modelos públicos fundacionales de Google**.
-* **Filtro de Sanitización en Memoria:** Antes de serializar cualquier prompt forense, el motor suprime automáticamente direcciones IP internas del clúster y cualquier clave privada.
+## 3. Uso de IA
 
----
+Parte del análisis es asistido por modelos de IA de uso gratuito (Google AI Studio / Gemini). A estos modelos solo se envían **datos técnicos públicos on-chain o texto técnico del propio sistema** — nunca datos personales, porque el sistema no los procesa.
 
-## 4. Derechos del Titular y Canal de Notificaciones (SLA < 24 Horas)
-Para cualquier solicitud de información técnica o notificación legal bajo DMCA / Protección de Datos:
-* **Buzón Oficial del Agente Designado:** `luis.growthhq@gmail.com`
-* **Compromiso de Respuesta:** SLA garantizado menor a 24 horas hábiles.
+## 4. Credenciales del operador
+
+Las llaves de administración y credenciales del sistema están bajo control exclusivo del operador, con permisos restrictivos a nivel de servidor. Este documento no cubre los datos del propio operador.
+
+## 5. Derechos y contacto
+
+Como el servicio no almacena datos personales de terceros, en principio no existen datos personales que acceder, rectificar o eliminar. Si consideras que algún dato tuyo llegó a nuestros registros (por ejemplo, por correspondencia directa), escríbenos y lo atenderemos caso por caso.
+
+**Contacto:** luis.growthhq@gmail.com — durante la fase temprana no ofrecemos SLA contractual, pero respondemos por correo tan pronto nos sea posible.
