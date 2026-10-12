@@ -43,6 +43,7 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
     event EmergencyPauseActivated();
     event EmergencyLiquidityRetreated(uint128 liquidityBurned);
     event EmergencyLiquidityRetreatFailed(uint128 liquidityAttempted);
+    event EmergencyLiquidityRetreatPartial(uint128 liquidityBurned);
     event LiquidityRestored(uint128 liquidityMinted);
     event EmergencyUnpaused();
     event EmergencyWindDownTriggered();
@@ -95,6 +96,10 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
         require(_tickLower % spacing == 0, "TICK_LOWER_NOT_ALIGNED");
         require(_tickUpper % spacing == 0, "TICK_UPPER_NOT_ALIGNED");
 
+        // R1 Hardening: Validar tokens inmutables contra el pool real de PancakeSwap v3
+        require(_token0 == IPancakeV3Pool(_targetPool).token0(), "TOKEN0_MISMATCH");
+        require(_token1 == IPancakeV3Pool(_targetPool).token1(), "TOKEN1_MISMATCH");
+
         owner = msg.sender;
         liquidityManager = msg.sender;
         circuitBreaker = _initialCircuitBreaker != address(0) ? _initialCircuitBreaker : msg.sender;
@@ -136,10 +141,11 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
                     retreatedLiquidity += liq;
                     emit EmergencyLiquidityRetreated(liq);
                 } catch {
-                    // Burn succeeded on-chain, position liquidity was converted to tokens owed in pool
+                    // Burn succeeded on-chain, position liquidity was converted to tokens owed in pool.
+                    // R2: Tokens remain claimable from pool via collectTokensOwed().
                     ownPositionLiquidity = 0;
                     retreatedLiquidity += liq;
-                    emit EmergencyLiquidityRetreated(liq);
+                    emit EmergencyLiquidityRetreatPartial(liq);
                 }
             } catch {
                 // Burn failed (e.g. pool frozen or reverting). Emergency pause SURVIVES!
@@ -148,6 +154,17 @@ contract BNBProtectedPoolReceiver is IPancakeV3MintCallback {
             }
         }
         emit EmergencyPauseActivated();
+    }
+
+    /// @notice R2: Allows recovering tokens owed in PancakeSwap v3 pool if collect reverted during emergency pause
+    function collectTokensOwed() external onlyCircuitBreaker nonReentrant returns (uint128 amount0, uint128 amount1) {
+        (amount0, amount1) = IPancakeV3Pool(targetPool).collect(
+            address(this),
+            tickLower,
+            tickUpper,
+            type(uint128).max,
+            type(uint128).max
+        );
     }
 
     function emergencyUnpause() external onlyCircuitBreaker {
