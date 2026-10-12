@@ -20,6 +20,6 @@
   "author": "Luis Aguilar (Sentinel Fleet Technologies)",
   "license": "MIT",
   "dependencies": {
-    "solc": "^0.8.37"
+    "solc": "^0.8.20"
   }
 }

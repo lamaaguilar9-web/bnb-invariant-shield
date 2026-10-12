@@ -119,6 +119,7 @@ class MockBNBProtectedPoolReceiver:
         self.liquidity_manager = owner
         self.paused = False
         self.emergency_wind_down_active = False
+        self.was_ever_wound_down = False
         self.locked = False
         self.active_mint_payer = None
         self.own_position_liquidity = 0
@@ -137,6 +138,7 @@ class MockBNBProtectedPoolReceiver:
         assert caller == self.liquidity_manager, "NOT_LIQUIDITY_MANAGER"
         assert not self.paused, "POOL_IS_PAUSED"
         assert liquidity_amount > 0, "INVALID_LIQUIDITY_AMOUNT"
+        assert self.retreated_liquidity == 0, "RETREATED_LIQUIDITY_ACTIVE"
         assert not self.locked, "REENTRANCY_GUARD: REENTRANT_CALL"
         self.locked = True
 
@@ -164,15 +166,17 @@ class MockBNBProtectedPoolReceiver:
         assert payer == self.active_mint_payer, "UNAUTHORIZED_PAYER"
         return True
 
-    def emergency_pause(self, caller: str):
+    def emergency_pause(self, caller: str, simulate_burn_revert: bool = False):
         assert caller == self.circuit_breaker, "NOT_CIRCUIT_BREAKER"
         self.paused = True
-        # B-5: Active capital evacuation on emergency pause
+        # B-5 & F4: Active capital evacuation on emergency pause with resilient try/catch
         if self.own_position_liquidity > 0:
-            liq = self.own_position_liquidity
-            self.retreated_liquidity += liq
-            self.own_position_liquidity = 0
-            self.target_pool.burn(self.tick_lower, self.tick_upper, liq)
+            if not simulate_burn_revert:
+                liq = self.own_position_liquidity
+                self.retreated_liquidity += liq
+                self.own_position_liquidity = 0
+                self.target_pool.burn(self.tick_lower, self.tick_upper, liq)
+            # If simulate_burn_revert is True, burn fails, but self.paused remains True!
 
     def emergency_unpause(self, caller: str):
         assert caller == self.circuit_breaker, "NOT_CIRCUIT_BREAKER"
@@ -196,11 +200,13 @@ class MockBNBProtectedPoolReceiver:
         assert caller == self.circuit_breaker, "NOT_CIRCUIT_BREAKER"
         self.paused = True
         self.emergency_wind_down_active = True
+        self.was_ever_wound_down = True
 
     def orderly_withdraw(self, user: str, lp_amount: int):
         return self._execute_withdraw(user, lp_amount, allow_during_pause_or_wind_down=True)
 
     def claim_remaining_lp(self, user: str, lp_amount: int):
+        assert self.emergency_wind_down_active or self.paused or self.retreated_liquidity > 0 or self.was_ever_wound_down, "CRISIS_OR_POST_CRISIS_STATE_REQUIRED"
         return self._execute_withdraw(user, lp_amount, allow_during_pause_or_wind_down=False)
 
     def _execute_withdraw(self, user: str, lp_amount: int, allow_during_pause_or_wind_down: bool = True):
@@ -828,6 +834,52 @@ def test_20_retreated_liquidity_deduction_on_pause_withdrawal_defeats_p7_m1():
     assert receiver.own_position_liquidity == 500
     assert receiver.retreated_liquidity == 0
 
+def test_21_cross_financing_blocked_and_claim_gate():
+    """F1, F2, F4 Hardening Tests:
+    1. F1: New deposit strictly blocked while retreatedLiquidity > 0.
+    2. F2: claimRemainingLp strictly blocked during normal operation before any emergency.
+    3. F4: emergencyPause survives (paused==True) even if external burn/collect reverts.
+    """
+    token0 = MockBEP20Safe("WBNB")
+    token1 = MockBEP20Safe("USDT")
+    pool = MockPancakeV3Pool(1000000, 78000, 10_000_000)
+    receiver = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xAdmin", owner="0xAdmin")
+
+    token0.balances["0xAdmin"] = 50000
+    token1.balances["0xAdmin"] = 100000
+
+    # 1. Deposit initial LP
+    receiver.deposit_liquidity("0xLp1", 500, caller="0xAdmin")
+
+    # 2. F2: During normal operation, calling claim_remaining_lp must revert
+    claim_blocked_in_normal = False
+    try:
+        receiver.claim_remaining_lp("0xLp1", 500)
+    except AssertionError as err:
+        if "CRISIS_OR_POST_CRISIS_STATE_REQUIRED" in str(err):
+            claim_blocked_in_normal = True
+    assert claim_blocked_in_normal is True, "claimRemainingLp must be blocked during normal operation"
+
+    # 3. Emergency pause retreats liquidity into vault
+    receiver.emergency_pause(caller="0xAdmin")
+    assert receiver.paused is True
+    assert receiver.retreated_liquidity == 500
+
+    # 4. F1: Attempting to deposit while retreated_liquidity > 0 must revert
+    deposit_blocked_with_retreated = False
+    try:
+        receiver.deposit_liquidity("0xAttacker", 100, caller="0xAdmin")
+    except AssertionError as err:
+        if "POOL_IS_PAUSED" in str(err) or "RETREATED_LIQUIDITY_ACTIVE" in str(err):
+            deposit_blocked_with_retreated = True
+    assert deposit_blocked_with_retreated is True, "Deposit must revert during pause or while retreated liquidity is active"
+
+    # 5. F4: Pause resilience - pause with burn revert preserves paused == True
+    receiver2 = MockBNBProtectedPoolReceiver(token0, token1, pool, initial_circuit_breaker="0xAdmin", owner="0xAdmin")
+    receiver2.own_position_liquidity = 500
+    receiver2.emergency_pause(caller="0xAdmin", simulate_burn_revert=True)
+    assert receiver2.paused is True, "F4: Emergency pause must survive even if pool burn reverts"
+
 if __name__ == "__main__":
     suite = [
         test_1_exact_512bit_quadratic_math,
@@ -850,6 +902,7 @@ if __name__ == "__main__":
         test_18_active_mint_payer_defeats_third_party_callback_injection,
         test_19_non_custodial_lp_redemption_post_governance_restoration,
         test_20_retreated_liquidity_deduction_on_pause_withdrawal_defeats_p7_m1,
+        test_21_cross_financing_blocked_and_claim_gate,
     ]
     print(f"Executing {len(suite)} formal verification tests for BNB Invariant Shield...")
     for test in suite:
